@@ -93,9 +93,10 @@ fails at first use:
 - **Windows builds from source.** llama.cpp publishes no `.lib` import libraries for Windows,
   and MSVC cannot link a DLL without one, so the prebuilt fast path is impossible there. Slow,
   and confined to `natives.yml`.
-- **Intel macOS (`darwin-x86_64`) is unreliable in CI** — those runners queue for a long time.
-  `natives.yml` stages whatever succeeded, and `release.yml` skips platforms that are not
-  staged. If Intel macOS never lands, stage it by hand from an Intel Mac:
+- **Intel macOS (`darwin-x86_64`) is NOT built in CI** — those runners queue indefinitely, and
+  one job that never starts blocks publishing for every platform that did. It is absent from
+  both matrices by design. `release.yml` skips platforms that are not staged, so the other three
+  publish normally. To add Intel macOS, stage it by hand from an Intel Mac:
   `./core/build.sh && cd core/dist && zip -ry natives-darwin-x86_64.zip darwin-x86_64 &&
   gh release upload natives-b9371 natives-darwin-x86_64.zip --clobber`
   (this is the pattern mochallama already uses for the same platform).

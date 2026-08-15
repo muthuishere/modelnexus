@@ -91,6 +91,11 @@ First public release. Pre-alpha: the API may still move.
   DLL without one, so CMake fails outright. Found the first time `build.cmd` ran in CI.
   `build.cmd` therefore defaults to source mode on Windows while `build.sh` still defaults to
   prebuilt on Unix. It is slow and confined to the rare natives workflow.
+- **Intel macOS (`darwin-x86_64`) is not built in CI.** GitHub's Intel runners queued
+  indefinitely — 50+ minutes with no start, repeatedly — and one job that never runs blocks the
+  publish step for every platform that did. It is dropped from both matrices and staged by hand
+  instead, which is what mochallama already does for the same platform; `PUBLISHING.md` has the
+  command. Published platforms are linux-x86_64, darwin-aarch64 and windows-x86_64.
 - **`natives.yml` now stages whatever built** (`if: always()`) instead of losing every platform
   because one failed or never got a runner. Intel macOS runners sit queued for a long time —
   mochallama seeds that platform by hand for the same reason — and `release.yml` already skips

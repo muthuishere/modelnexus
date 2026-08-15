@@ -40,9 +40,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # NOTE: darwin-x86_64 is deliberately absent. GitHub's Intel macOS runners
+          # queue indefinitely -- observed 50+ minutes with no start, repeatedly -- and
+          # one job that never runs blocks the publish step for every platform that
+          # did. mochallama hit exactly this and seeds Intel macOS by hand; PUBLISHING.md
+          # carries the one-liner. Re-add this entry if the runners become reliable.
           - { os: ubuntu-latest,   platform: linux-x86_64,   script: sh }
           - { os: macos-latest,    platform: darwin-aarch64, script: sh }
-          - { os: macos-13,        platform: darwin-x86_64,  script: sh }
           - { os: windows-latest,  platform: windows-x86_64, script: cmd }
     runs-on: ${{ matrix.os }}
     steps:

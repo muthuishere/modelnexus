@@ -19,9 +19,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # No macos-13: Intel runners queue indefinitely and would hold every push.
           - { os: ubuntu-latest,  platform: linux-x86_64 }
           - { os: macos-latest,   platform: darwin-aarch64 }
-          - { os: macos-13,       platform: darwin-x86_64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
