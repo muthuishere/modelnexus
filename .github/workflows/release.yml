@@ -170,6 +170,29 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -e
+
+          # npm publish <name> treats a bare argument as a PACKAGE SPEC to fetch, not
+          # a directory -- "npm publish pkg-linux-x86_64" produced
+          # "E404 GET /pkg-linux-x86_64 ... is not in this registry". Always ./-prefix
+          # the path.
+          #
+          # And never `|| echo skipping`: that swallows auth failures and makes the job
+          # report success while publishing nothing. This run did exactly that -- green
+          # job, four packages still 404. Only a genuine "already published" is
+          # tolerated; anything else fails the job.
+          publish_dir() {
+            local dir="$1" out rc
+            out="$(npm publish "$dir" --access public 2>&1)" && { echo "$out"; return 0; }
+            rc=$?
+            echo "$out"
+            if grep -qiE "cannot publish over|EPUBLISHCONFLICT|previously published|409" <<<"$out"; then
+              echo "  -> already published at this version; continuing"
+              return 0
+            fi
+            echo "::error::npm publish failed for $dir"
+            return $rc
+          }
+
           # optionalDependencies: npm installs only the platform that matches and
           # skips the rest without erroring. Proven pattern -- mochallama's CLI ships
           # this way today.
@@ -201,6 +224,6 @@ jobs:
             "license": "MIT"
           }
           JSON
-            npm publish "$pkg" --access public || echo "already published, skipping"
+            publish_dir "./$pkg"
           done
-          npm publish bindings/js --access public || echo "already published, skipping"
+          publish_dir ./bindings/js
