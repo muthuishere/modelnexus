@@ -15,3 +15,8 @@ obj/
 .DS_Store
 .idea/
 .vscode/
+
+# native build artefacts
+core/third_party/
+core/build/
+core/dist/

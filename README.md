@@ -3,10 +3,11 @@
 **Local LLM inference as a C ABI, bound into five languages.** llama.cpp underneath,
 GGUF models, no daemon, no HTTP hop, no native-install dance.
 
-> Status: **pre-alpha, nothing published.** The C core is being extracted from
+> Status: **pre-alpha, nothing published — but it runs.** The C core is extracted from
 > [mochallama](https://github.com/deemwar-products/mochallama), where it has been running in
-> production as `llamabridge` behind Java/Panama. See `docs/adr/` for the decisions and
-> `openspec/changes/` for the work in flight.
+> production as `llamabridge` behind Java/Panama. Two bindings are working and tested against a
+> real model; three are not written yet. See `docs/adr/` for the decisions and
+> `openspec/changes/` for what is in flight.
 
 ## What this is
 
@@ -15,11 +16,20 @@ UTF-8 strings the caller frees — plus one thin binding per language:
 
 | language | mechanism | status |
 |---|---|---|
-| Java | Panama FFM (JDK 22+) | proven in mochallama |
-| Go | `purego` (no cgo) | planned |
-| Python | `ctypes` | planned |
-| C# | P/Invoke | planned |
-| JS/TS | `koffi` / Node-API | planned |
+| Python | `ctypes` | **working** — 7 tests green against a real GGUF |
+| Go | `purego`, no cgo | **working** — 7 tests green, `CGO_ENABLED=0`, `go vet` clean |
+| Java | Panama FFM (JDK 22+) | proven in mochallama; not yet moved here |
+| C# | P/Invoke | not written |
+| JS/TS | `koffi` / Node-API | not written |
+
+```bash
+task build     # download llama.cpp's prebuilt libs, compile only our bridge (seconds)
+task verify    # confirm the ABI exports and every runtime dep resolves
+task test      # run every binding's suite against a real model
+```
+
+Set `MODELNEXUS_MODEL` to a tool-capable GGUF to run the model-backed tests; without it
+they skip rather than fail.
 
 Inference runs **inside your process**. Nothing is served, nothing is spawned, nothing
 leaves the box.

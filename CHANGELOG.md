@@ -7,15 +7,39 @@ time.
 ## Unreleased
 
 ### Added
-- Repository scaffolding: ADR log, spikes directory, OpenSpec workflow, and the house
-  contribution rules in `CLAUDE.md`.
-- ADR-0001 … ADR-0005 recording the decisions that define this repo: one runtime, the ABI as
-  the product, independence from toolnexus, the two-tier native release model, and
-  mochallama's demotion from owner to consumer of the core.
-- Spike 0001 — a portability read of mochallama's `llamabridge`, concluding that the existing
-  C surface carries no Java-specific coupling and can be extracted as-is.
+- **The native core builds and runs.** `core/` holds the `extern "C"` bridge over llama.cpp,
+  extracted from mochallama unchanged in substance, with `core/build.sh` replacing Gradle as
+  the orchestrator so a Go or Python consumer needs no JVM toolchain. Default mode downloads
+  llama.cpp's official prebuilt release libraries and compiles only the bridge — seconds, not
+  an engine build. `--source` builds llama.cpp too, for when you want the whole thing yourself.
+- **Python binding** (`ctypes`) — `Chat`, `model_info`, `version`, streaming via `on_token`,
+  context-manager lifecycle, typed `ModelError` carrying the core's stable error code.
+- **Go binding** (`purego`, no cgo) — `Open`, `Infer`, `InferStream`, `Info`, `Version`, typed
+  `Error`, and a distinct `ErrNativeLibraryNotFound` listing every path searched. Builds and
+  vets clean with `CGO_ENABLED=0`, so cross-compilation still works.
+- **Taskfile** — `task build`, `verify`, `test`, `dist`, `clean`, plus `llama:pinned` /
+  `llama:latest` / `llama:pin TAG=…` for moving the pinned llama.cpp release deliberately.
+  Nothing auto-updates: a silent engine bump would change inference output underneath users.
+- ADR-0001 … ADR-0005, and spikes 0001 (the bridge is portable as-is) and 0002 (callback
+  lifetime — the core retains the event callback, and a binding that forgets crashes).
+
+### Fixed
+- Staging copied `libllama.dylib` but not the **versioned** `libllama.0.dylib` /
+  `libllama-common.0.dylib` the bridge actually links, producing a `dist/` that looked complete
+  and failed to load. It now matches versioned names, and excludes llama.cpp's `*-impl`
+  tool libraries, which are not runtime dependencies.
 
 ### Not done yet
-- No code. The C core has not been extracted, no binding exists, nothing is published.
-- The ABI lacks LoRA adapter loading, embeddings, and reranking — the three capabilities that
-  motivated this repo. Tracked in `openspec/changes/extract-llamabridge-core/`.
+- **No Java, C#, or JS binding.** Java is proven in mochallama but has not moved here.
+- **No LoRA, embeddings, or reranking.** The ABI is chat-only — these are the three
+  capabilities that motivated this repo and none of them exists yet. Tracked in
+  `openspec/changes/extract-llamabridge-core/`.
+- **No log control.** llama.cpp writes verbosely to stderr and the ABI has no way to quiet it,
+  so an embedding application inherits engine chatter it cannot switch off. Needs an ABI
+  addition; recorded in spike 0002.
+- **Nothing is published**, and no release workflow exists. mochallama still vendors its own
+  copy of the bridge and is unchanged.
+- The header does not document that `llb_chat_create` **retains** the event callback. That is
+  an ABI documentation defect, found the hard way in spike 0002, and should be fixed in the
+  core rather than worked around per binding.
+- Windows is unbuilt: `core/build.sh` covers macOS and Linux only.

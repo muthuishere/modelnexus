@@ -2,8 +2,9 @@
 
 ## 0. De-risk
 
-- [ ] Spike 0002 — streaming callback across purego and Panama: is the token callback safe
-      when invoked from a native thread? Record the verdict per runtime.
+- [x] Spike 0002 — callbacks across ctypes and purego. Verdict: both work; the core RETAINS
+      the event callback for the engine's life, so a local trampoline segfaults. Panama,
+      P/Invoke and koffi still unverified.
 - [ ] Spike 0003 — does the standalone CMake build cross-compile for linux-x64, linux-arm64,
       darwin-arm64, darwin-x64, windows-x64 while consuming prebuilt llama.cpp libs?
 - [ ] Read `llamabridge.cpp` (703 lines) end to end and record any assumption the header does
@@ -11,10 +12,17 @@
 
 ## 1. Core
 
-- [ ] Move `llamabridge.h` / `llamabridge.cpp` into `core/`, unchanged in substance.
-- [ ] CMake build producing a shared library per platform, consuming prebuilt llama.cpp.
-- [ ] Pin the llama.cpp tag explicitly and surface it through `llb_version`.
+- [x] Move `llamabridge.h` / `llamabridge.cpp` into `core/`, unchanged in substance.
+- [x] CMake build producing a shared library per platform, consuming prebuilt llama.cpp
+      (`core/build.sh`; macOS + Linux — Windows still to do).
+- [x] Pin the llama.cpp tag explicitly and surface it through `llb_version` (b9371).
 - [ ] A C smoke test that loads a small GGUF, infers once, and frees — no language runtime.
+
+## 1b. Python binding (ctypes) — added, was not in the original plan
+
+- [x] `bindings/python/` — loader with an explicit `NativeLibraryNotFound`, `Chat`,
+      `model_info`, `version`, streaming, typed `ModelError`.
+- [x] 7 tests green against a real GGUF; they skip, not fail, without `MODELNEXUS_MODEL`.
 
 ## 2. Java binding (Panama)
 
@@ -23,9 +31,10 @@
 
 ## 3. Go binding (purego)
 
-- [ ] `bindings/go/` — purego loader, `CGO_ENABLED=0` enforced in CI.
-- [ ] Explicit typed error for "shared library not found / not initialized".
-- [ ] Tests mirroring the Java set, asserting the **same error codes**.
+- [x] `bindings/go/` — purego loader, builds and vets clean with `CGO_ENABLED=0`.
+- [x] Explicit typed error for "shared library not found / not initialized"
+      (`ErrNativeLibraryNotFound`, listing every path searched).
+- [x] Tests mirroring the Python set, asserting the **same error codes**. 7 pass.
 
 ## 4. Parity
 
@@ -53,3 +62,12 @@
 - [ ] ~~Python / C# / JS bindings~~ → separate change
 - [ ] ~~Switching mochallama to consume the core~~ → separate change (ADR-0005)
 - [ ] ~~Registry publishing~~ → separate change
+
+## Found during implementation (new work)
+
+- [ ] The header does not document that `llb_chat_create` **retains** the event callback for
+      the engine's lifetime. Fix the doc comment in the core — every binding will otherwise
+      rediscover this as a crash (spike 0002).
+- [ ] No log control in the ABI. llama.cpp writes verbosely to stderr and an embedding host
+      cannot quiet it. Needs an `llb_set_log_*` entry point.
+- [ ] Windows support in `core/build.sh` (macOS and Linux only today).

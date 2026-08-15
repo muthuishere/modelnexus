@@ -20,3 +20,4 @@ Rules:
 | # | question | verdict |
 |---|---|---|
 | [0001](0001-bridge-portability/) | Is mochallama's `llamabridge` C surface bindable from non-Java FFIs as-is? | **Yes** — no Java coupling; extraction is packaging, not redesign |
+| [0002](0002-callback-lifetime-and-threading/) | Can each runtime take the C callbacks, and for how long must they live? | **Yes, but** the core retains the event callback for the engine's life — a local trampoline segfaults |

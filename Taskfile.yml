@@ -1,0 +1,164 @@
+version: '3'
+
+# modelnexus — one entry point for the native core and every binding.
+#
+#   task            list everything
+#   task build      build the native bridge (fast path: prebuilt llama.cpp libs)
+#   task test       build, then run every binding's tests against the real core
+#
+# The llama.cpp tag is pinned in core/build.sh and is part of the release identity
+# (ADR-0004). `task llama:latest` tells you what upstream has; `task llama:pin`
+# moves us onto it deliberately. Nothing auto-updates — a silent engine bump would
+# change inference output underneath users.
+
+vars:
+  PLATFORM:
+    sh: |
+      case "$(uname -s)" in Darwin) o=darwin;; Linux) o=linux;; *) o=unsupported;; esac
+      case "$(uname -m)" in x86_64|amd64) a=x86_64;; arm64|aarch64) a=aarch64;; *) a=unknown;; esac
+      echo "$o-$a"
+  DIST: core/dist/{{.PLATFORM}}
+  # A small tool-capable GGUF used by the smoke tests. Override to test another.
+  MODEL: '{{.MODEL | default "~/.chatbot_models/qwen2.5-1.5b-instruct-q4_k_m.gguf"}}'
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds: ['task --list']
+
+  # ---------------------------------------------------------------- native core
+
+  build:
+    desc: Build the native bridge (prebuilt llama.cpp — seconds, no engine compile)
+    cmds: ['./core/build.sh']
+
+  build:source:
+    desc: Build the bridge AND llama.cpp from source (slow; yours end to end)
+    cmds: ['./core/build.sh --source']
+
+  rebuild:
+    desc: Clean and build the native bridge from scratch
+    cmds: ['./core/build.sh --clean']
+
+  dist:
+    desc: Show what is staged for this platform
+    silent: true
+    cmds:
+      - 'echo "platform: {{.PLATFORM}}"'
+      - 'ls -1 {{.DIST}} 2>/dev/null || echo "nothing built yet — run: task build"'
+
+  verify:
+    desc: Check the built library exports the full ABI and resolves its deps
+    silent: true
+    deps: [build]
+    cmds:
+      - |
+        cd {{.DIST}}
+        lib=$(ls libllamabridge.* 2>/dev/null | head -1)
+        [ -n "$lib" ] || { echo "no bridge in {{.DIST}}"; exit 1; }
+        echo "== exported ABI =="
+        if command -v nm >/dev/null; then nm -gU "$lib" 2>/dev/null | grep -o 'llb_[a-z_]*' | sort -u; fi
+        echo "== runtime deps =="
+        if command -v otool >/dev/null; then
+          for d in $(otool -L "$lib" | tail -n +3 | awk '{print $1}' | grep '@rpath' | sed 's|@rpath/||'); do
+            printf "  %-32s %s\n" "$d" "$([ -f "$d" ] && echo OK || echo MISSING)"
+          done
+        elif command -v ldd >/dev/null; then ldd "$lib"; fi
+
+  # ---------------------------------------------------------------- llama.cpp pin
+
+  llama:pinned:
+    desc: Show the llama.cpp tag this build is pinned to
+    silent: true
+    cmds: ['echo "pinned: $(sh core/build.sh --print-tag)"']
+
+  llama:latest:
+    desc: Show llama.cpp's latest upstream release (does NOT change the pin)
+    silent: true
+    cmds:
+      - |
+        # Capture the whole body first: piping curl into `grep -m1` closes the pipe
+        # early and curl dies with "(56) Failure writing output to destination".
+        body=$(curl -fsSL https://api.github.com/repos/ggml-org/llama.cpp/releases/latest)
+        latest=$(printf '%s' "$body" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+        current=$(sh core/build.sh --print-tag)
+        echo "pinned:   $current"
+        echo "upstream: $latest"
+        [ "$latest" = "$current" ] && echo "→ up to date" || echo "→ move with: task llama:pin TAG=$latest"
+
+  llama:pin:
+    desc: Repin to a llama.cpp tag and rebuild (TAG=bXXXX). Deliberate, never automatic.
+    requires: {vars: [TAG]}
+    cmds:
+      - 'sed -i.bak "s/LLAMA_TAG:-[^}]*}/LLAMA_TAG:-{{.TAG}}}/" core/build.sh && rm -f core/build.sh.bak'
+      - 'rm -rf core/third_party core/build'
+      - './core/build.sh'
+      - |
+        echo
+        echo "Repinned to {{.TAG}} and rebuilt."
+        echo "This changes inference behaviour. Before committing:"
+        echo "  1. task test        — every binding still passes"
+        echo "  2. note the bump in CHANGELOG.md under ## Unreleased"
+
+  # ---------------------------------------------------------------- tests
+
+  test:
+    desc: Build, then run every binding's tests
+    cmds:
+      - task: build
+      - task: test:python
+      - task: test:go
+
+  test:python:
+    desc: Python binding (ctypes) smoke test
+    dir: bindings/python
+    cmds: ['python3 -m pytest -q tests/']
+    env:
+      MODELNEXUS_MODEL: '{{.MODEL}}'
+
+  test:go:
+    desc: Go binding (purego, CGO_ENABLED=0) tests
+    dir: bindings/go
+    env:
+      CGO_ENABLED: '0'
+      MODELNEXUS_MODEL: '{{.MODEL}}'
+    cmds: ['go test ./... -v']
+
+  # ---------------------------------------------------------------- publishing
+
+  publish:
+    desc: (not wired) Publishing is CI-only — see ADR-0004
+    silent: true
+    cmds:
+      - |
+        echo "Nothing publishes from a laptop. That is ADR-0004, not an oversight:"
+        echo
+        echo "  tier 1  natives.yml  — rare; compiles the per-platform native closure"
+        echo "                         into a durable, tag-keyed prerelease"
+        echo "  tier 2  release.yml  — every vX.Y.Z tag; compiles NOTHING, downloads"
+        echo "                         the staged natives and pushes to the registries"
+        echo
+        echo "Neither workflow exists yet. Tracked in"
+        echo "openspec/changes/extract-llamabridge-core/tasks.md §5."
+        exit 1
+
+  # ---------------------------------------------------------------- housekeeping
+
+  clean:
+    desc: Remove build output (keeps the downloaded llama.cpp headers)
+    cmds: ['rm -rf core/build core/dist']
+
+  clean:all:
+    desc: Remove build output AND the llama.cpp checkout (forces a fresh clone)
+    cmds: ['rm -rf core/build core/dist core/third_party']
+
+  spec:
+    desc: Validate every OpenSpec change in this repo
+    silent: true
+    cmds:
+      - |
+        for c in openspec/changes/*/; do
+          n=$(basename "$c"); [ "$n" = "archive" ] && continue
+          openspec validate "$n"
+        done
