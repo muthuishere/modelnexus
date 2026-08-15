@@ -6,6 +6,10 @@ time.
 
 ## Unreleased
 
+## 0.1.0 — 2026-08-15
+
+First public release. Pre-alpha: the API may still move.
+
 ### Changed
 - The PyPI **distribution** is `modelnexus-core`, not `modelnexus` — that name is held by an
   unrelated project ("Global AI Model Vault", 1.0.4) and PyPI normalises case-insensitively.
