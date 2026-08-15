@@ -105,6 +105,7 @@ Three independent libraries. None imports another. They meet at the OpenAI wire 
 | `docs/adr/` | architecture decision records — **read these first** |
 | `spikes/` | throwaway proofs that de-risk a decision before it becomes a spec |
 | `openspec/` | spec-driven change workflow; behaviour is pinned here before it is coded |
+| `PUBLISHING.md` | how each registry is published, and the owner-only setup it needs |
 
 ## License
 

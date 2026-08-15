@@ -84,10 +84,14 @@ user gets, not what a file did. Name what is *not* done and where it is tracked.
 
 ## Releasing
 
-Not yet wired. The intended model is mochallama's proven two-tier split (ADR-0004): a rare
-native-build tier producing durable per-platform prereleases, and a per-tag publish tier that
-**never compiles** — it downloads the natives and pushes to the registries. Nothing is ever
-published from a laptop.
+See **`PUBLISHING.md`** for the runbook and the owner-only registry setup.
+
+Two tiers (ADR-0004): `natives.yml` compiles the per-platform closure into a durable,
+tag-keyed prerelease; `release.yml` **never compiles** — it downloads those and publishes.
+Nothing is ever published from a laptop. Targets are Go, PyPI and npm; there is no NuGet leg.
+
+The PyPI distribution is **`modelnexus-core`** (the bare name is taken by an unrelated
+project); the import is still `modelnexus`.
 
 ## Do not
 
