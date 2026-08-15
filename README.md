@@ -39,6 +39,17 @@ against a real 1.5B model and a real reranker: identical output, down to rerank 
 | **reranking** | query-document scoring with a reranker model |
 | **log control** | silence the engine, or route its output to your own logger |
 
+### Installing
+
+```bash
+pip install modelnexus-core            # import modelnexus
+npm  install @muthuishere/modelnexus
+go   get github.com/muthuishere/modelnexus/bindings/go
+```
+
+The PyPI *distribution* is `modelnexus-core` because `modelnexus` is held by an unrelated
+project; the *import* is still `modelnexus`.
+
 ### Getting the native library
 
 Python and JS ship it inside the package — install and it works. Go resolves it at runtime,

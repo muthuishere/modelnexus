@@ -6,6 +6,12 @@ time.
 
 ## Unreleased
 
+### Changed
+- The PyPI **distribution** is `modelnexus-core`, not `modelnexus` — that name is held by an
+  unrelated project ("Global AI Model Vault", 1.0.4) and PyPI normalises case-insensitively.
+  The **import is unchanged**: `import modelnexus`. npm (`@muthuishere/modelnexus`) and the Go
+  module path are unaffected.
+
 ### Added
 - **Log control** — `set_log_level` / `SetLogLevel` and a handler hook in every binding.
   llama.cpp writes hundreds of lines to stderr per model load; the bridge now owns that sink,

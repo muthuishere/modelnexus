@@ -3,8 +3,11 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "modelnexus"
-version = "0.0.1"
+# PyPI's "modelnexus" is held by an unrelated project (ModelNexus 1.0.4, "Global AI
+# Model Vault"), and PyPI normalises names case-insensitively. The DISTRIBUTION is
+# modelnexus-core; the import stays `import modelnexus`.
+name = "modelnexus-core"
+version = "0.1.0"
 description = "Local LLM inference in your own process — llama.cpp via a C ABI. No daemon, no port."
 readme = "README.md"
 requires-python = ">=3.9"
