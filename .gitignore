@@ -1,0 +1,17 @@
+build/
+dist/
+out/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.gguf
+.venv/
+__pycache__/
+node_modules/
+bin/
+obj/
+.DS_Store
+.idea/
+.vscode/
