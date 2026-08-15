@@ -139,6 +139,11 @@ jobs:
         with:
           packages-dir: bindings/python/dist_all
           skip-existing: true
+          # Empty when the secret is unset, which is how the action selects OIDC
+          # trusted publishing. Set PYPI_API_TOKEN to use a token instead -- useful
+          # for a first publish, since a pending trusted publisher has to be created
+          # by hand before the project exists.
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
   publish-npm:
     needs: [preflight, natives]
@@ -157,6 +162,9 @@ jobs:
         env:
           NPM_CONFIG_PROVENANCE: 'true'
           VERSION: ${{ needs.preflight.outputs.version }}
+          # Wired so that setting the secret is sufficient. Leave it unset to use npm
+          # trusted publishing (OIDC) instead; empty is simply ignored by npm.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -e
           # optionalDependencies: npm installs only the platform that matches and

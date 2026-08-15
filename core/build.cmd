@@ -1,16 +1,26 @@
 @echo off
 rem Build the modelnexus native bridge on Windows.
 rem
-rem The batch counterpart to build.sh, driving the same CMakeLists with the same two
-rem modes. Plain cmd rather than PowerShell: execution policy never blocks a .cmd, and
-rem Windows 10 1803+ ships both curl.exe and tar.exe (bsdtar, which reads zip), so
-rem downloading and extracting need nothing installed.
+rem The batch counterpart to build.sh, driving the same CMakeLists. Plain cmd rather
+rem than PowerShell: execution policy never blocks a .cmd, and Windows 10 1803+ ships
+rem both curl.exe and tar.exe (bsdtar, which reads zip), so nothing needs installing.
 rem
-rem   build.cmd                prebuilt mode (default) -- download llama.cpp's official
-rem                            release libs, compile ONLY our one-file bridge.
-rem   build.cmd --source       build llama.cpp from the checkout too. Slow.
+rem   build.cmd                SOURCE mode -- the default here, unlike build.sh.
+rem   build.cmd --prebuilt     link llama.cpp's release binaries. DOES NOT WORK; see below.
 rem   build.cmd --clean        remove build\ and dist\ first.
 rem   build.cmd --print-tag    print the pinned llama.cpp tag and exit.
+rem
+rem WHY WINDOWS DEFAULTS TO SOURCE WHEN UNIX DEFAULTS TO PREBUILT
+rem
+rem llama.cpp's Windows release archive ships 29 DLLs and ZERO .lib import libraries.
+rem MSVC cannot link a DLL without its import library, so CMake fails with
+rem   "Could not find LLB_LIB_LLAMA using the following names: llama"
+rem -- which is exactly what happened the first time this ran in CI. Nothing in this
+rem repo can fix that; it is what upstream publishes.
+rem
+rem Building llama.cpp from source produces the .lib files as a matter of course. It
+rem is slow, and that is acceptable: this runs only in the rare tier-1 natives
+rem workflow (ADR-0004), never on a release tag.
 rem
 rem Output: dist\<platform-key>\ with llamabridge.dll and the llama/ggml DLLs it loads
 rem at runtime. Windows resolves siblings from the DLL's own directory, which is why
@@ -23,13 +33,16 @@ rem identity (ADR-0004), and two build scripts disagreeing about it would produc
 rem artifacts that claim one version and behave like another.
 if "%LLAMA_TAG%"=="" set "LLAMA_TAG=b9371"
 
-set "MODE=prebuilt"
+rem Source by default here -- see the note above. --prebuilt is kept so the failure is
+rem reproducible and explicit rather than mysterious.
+set "MODE=source"
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
 :parse
 if "%~1"=="" goto parsed
 if /I "%~1"=="--source"    set "MODE=source"      & shift & goto parse
+if /I "%~1"=="--prebuilt"  set "MODE=prebuilt"    & shift & goto parse
 if /I "%~1"=="--clean"     set "DO_CLEAN=1"       & shift & goto parse
 if /I "%~1"=="--print-tag" echo %LLAMA_TAG%       & exit /b 0
 if /I "%~1"=="--help"      goto usage
@@ -104,6 +117,8 @@ if /I "%MODE%"=="prebuilt" (
     if not defined LIBDIR set "LIBDIR=%%~dpF"
   )
   if not defined LIBDIR echo prebuilt !ARCHIVE! did not contain llama.dll>&2 & exit /b 1
+  echo WARNING: prebuilt mode has no .lib import libraries upstream and will fail to>&2
+  echo          configure. Use source mode ^(the default^) instead.>&2
   if "!LIBDIR:~-1!"=="\" set "LIBDIR=!LIBDIR:~0,-1!"
   echo ==^> linking against prebuilt libs in !LIBDIR!
   set "CMAKEARGS=!CMAKEARGS! -DLLB_PREBUILT_DIR="!LIBDIR!""
@@ -143,9 +158,9 @@ exit /b 0
 :usage
 echo Build the modelnexus native bridge on Windows.
 echo.
-echo   build.cmd                prebuilt mode ^(default^) -- download llama.cpp release
-echo                            libs, compile ONLY our one-file bridge.
-echo   build.cmd --source       build llama.cpp from the checkout too. Slow.
+echo   build.cmd                source mode ^(default^) -- builds llama.cpp too. Slow,
+echo                            and necessary: upstream ships no Windows import libs.
+echo   build.cmd --prebuilt     link release binaries. Fails; kept for diagnosis.
 echo   build.cmd --clean        remove build\ and dist\ first.
 echo   build.cmd --print-tag    print the pinned llama.cpp tag and exit.
 exit /b 0

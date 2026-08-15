@@ -88,7 +88,18 @@ fails at first use:
 - `bindings/js` declared **no `optionalDependencies`**, and its loader only looked inside its
   own package — so the launcher could never find a separately published platform package.
 
+## Platform notes
+
+- **Windows builds from source.** llama.cpp publishes no `.lib` import libraries for Windows,
+  and MSVC cannot link a DLL without one, so the prebuilt fast path is impossible there. Slow,
+  and confined to `natives.yml`.
+- **Intel macOS (`darwin-x86_64`) is unreliable in CI** — those runners queue for a long time.
+  `natives.yml` stages whatever succeeded, and `release.yml` skips platforms that are not
+  staged. If Intel macOS never lands, stage it by hand from an Intel Mac:
+  `./core/build.sh && cd core/dist && zip -ry natives-darwin-x86_64.zip darwin-x86_64 &&
+  gh release upload natives-b9371 natives-darwin-x86_64.zip --clobber`
+  (this is the pattern mochallama already uses for the same platform).
+
 ## Not verified
 
-- **Windows** has never been executed, here or in CI.
 - **No release has been cut**, so the workflows have not run end to end.

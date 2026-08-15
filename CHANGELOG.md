@@ -86,8 +86,15 @@ First public release. Pre-alpha: the API may still move.
 - **Nothing is published yet.** The workflows exist and are valid, but no release has been
   cut and the `ENABLE_GO` / `ENABLE_PYPI` / `ENABLE_NPM` repo variables are unset, so every
   publishing leg would skip.
-- **Windows is written but unrun.** `core/build.cmd` and the CI matrix entry exist; no Windows
-  machine has executed either, here or in CI.
+- **Windows builds from source, not prebuilt binaries** — and it has to. llama.cpp's Windows
+  release archive ships 29 DLLs and **zero `.lib` import libraries**, and MSVC cannot link a
+  DLL without one, so CMake fails outright. Found the first time `build.cmd` ran in CI.
+  `build.cmd` therefore defaults to source mode on Windows while `build.sh` still defaults to
+  prebuilt on Unix. It is slow and confined to the rare natives workflow.
+- **`natives.yml` now stages whatever built** (`if: always()`) instead of losing every platform
+  because one failed or never got a runner. Intel macOS runners sit queued for a long time —
+  mochallama seeds that platform by hand for the same reason — and `release.yml` already skips
+  platforms that are not staged, so partial coverage degrades instead of blocking a release.
 - **mochallama has not been switched** to consume this core. It keeps its own copy of the
   bridge and ships unchanged — deliberately staged, per ADR-0005.
 - **No NuGet publishing.** The C# binding works and is tested; it is simply not published.

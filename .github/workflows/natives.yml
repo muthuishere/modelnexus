@@ -55,7 +55,9 @@ jobs:
       - name: Build (windows)
         if: matrix.script == 'cmd'
         shell: cmd
-        run: core\build.cmd
+        # Source mode, because llama.cpp publishes no Windows import libraries.
+        # Slow by design and confined to this rare workflow.
+        run: core\build.cmd --source
 
       - name: Package
         shell: bash
@@ -72,6 +74,12 @@ jobs:
 
   publish:
     needs: [tag, build]
+    # always(): stage whatever DID build rather than losing every platform because one
+    # failed or never got a runner. Intel macOS runners in particular sit queued for
+    # ages -- mochallama seeds that platform by hand for the same reason. release.yml
+    # already skips platforms that are not staged, so partial coverage degrades
+    # gracefully instead of blocking a release outright.
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
