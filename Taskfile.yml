@@ -18,10 +18,17 @@ vars:
       case "$(uname -m)" in x86_64|amd64) a=x86_64;; arm64|aarch64) a=aarch64;; *) a=unknown;; esac
       echo "$o-$a"
   DIST: core/dist/{{.PLATFORM}}
-  # A small tool-capable GGUF used by the smoke tests. Override to test another.
-  MODEL: '{{.MODEL | default "~/.chatbot_models/qwen2.5-1.5b-instruct-q4_k_m.gguf"}}'
+  # A small tool-capable GGUF used by the tests. Override to test another.
+  #
+  # Resolved to an ABSOLUTE path through the shell. A literal "~" reaches the test
+  # process unexpanded -- only Python's expanduser would cope, so the Go, C# and JS
+  # suites would silently skip (or crash) on a path that merely looks right. That
+  # happened; hence `sh:` rather than a plain default.
+  MODEL:
+    sh: 'echo "${MODEL:-$HOME/.chatbot_models/qwen2.5-1.5b-instruct-q4_k_m.gguf}"'
   # A reranker GGUF (needs "rank" pooling). Rerank tests skip without it.
-  RERANKER: '{{.RERANKER | default "~/.chatbot_models/bge-reranker-v2-m3-Q4_K_M.gguf"}}'
+  RERANKER:
+    sh: 'echo "${RERANKER:-$HOME/.chatbot_models/bge-reranker-v2-m3-Q4_K_M.gguf}"'
 
 tasks:
   default:
@@ -105,9 +112,21 @@ tasks:
 
   # ---------------------------------------------------------------- tests
 
+  models:
+    desc: Report whether the test models are present (they are not in the repo)
+    silent: true
+    cmds:
+      - |
+        for pair in "chat:{{.MODEL}}" "reranker:{{.RERANKER}}"; do
+          name=${pair%%:*}; path=${pair#*:}
+          if [ -f "$path" ]; then printf "  %-9s present  %s\n" "$name" "$path"
+          else printf "  %-9s MISSING  %s\n     -> tests needing it will SKIP, not fail\n" "$name" "$path"; fi
+        done
+
   test:
     desc: Build, then run every binding's tests
     cmds:
+      - task: models
       - task: build
       - task: test:python
       - task: test:go

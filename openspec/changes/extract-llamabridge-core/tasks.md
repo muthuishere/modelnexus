@@ -71,3 +71,17 @@
 - [ ] No log control in the ABI. llama.cpp writes verbosely to stderr and an embedding host
       cannot quiet it. Needs an `llb_set_log_*` entry point.
 - [ ] Windows support in `core/build.sh` (macOS and Linux only today).
+
+## Landed beyond the original scope
+
+- [x] LoRA ABI (`llb_chat_lora`, JSON op dispatch) + Go/Python/C#/JS bindings.
+- [x] Embeddings + reranking ABI (`llb_embed_create` / `llb_embed` / `llb_rerank` /
+      `llb_embed_destroy`) on a separate handle, with a hard refusal when reranking is asked
+      of a non-rank engine.
+- [x] C# binding (P/Invoke) and JS binding (koffi).
+- [x] Cross-binding verification against a real 1.5B model and bge-reranker-v2-m3: four
+      bindings, identical results and identical error codes.
+- [ ] ~~Java binding~~ — dropped, ADR-0006.
+- [ ] Load a real `.gguf` LoRA adapter end to end. Only the failure paths are exercised today.
+- [ ] Batch multiple sequences per decode in the embedding path.
+- [ ] A proper C# test suite rather than the current smoke run.
