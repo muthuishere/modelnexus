@@ -15,8 +15,10 @@ time.
 - **Batched embedding** — several sequences per decode instead of one, chunked to respect
   `n_batch` and `n_seq_max`. Vectors are bit-identical to the unbatched path; measured 1.2x on
   a 1.5B model, more on small dedicated embedders where per-decode overhead dominates.
-- **Windows build** — `core/build.ps1`, the PowerShell counterpart to `build.sh`, driving the
-  same CMake with the same two modes.
+- **Windows build** — `core/build.cmd`, the batch counterpart to `build.sh`, driving the same
+  CMake with the same two modes. Plain `cmd` rather than PowerShell: execution policy never
+  blocks a `.cmd`, and Windows 10 1803+ ships `curl` and `tar` (bsdtar reads zip), so nothing
+  needs installing.
 - **Publishing** — three GitHub workflows: `ci.yml` (build + all four suites on every push,
   including an ABI completeness check), `natives.yml` (tier 1: compile the per-platform native
   closure into a durable, tag-keyed prerelease), `release.yml` (tier 2: **never compiles**;
@@ -74,8 +76,8 @@ time.
 - **Nothing is published yet.** The workflows exist and are valid, but no release has been
   cut and the `ENABLE_GO` / `ENABLE_PYPI` / `ENABLE_NPM` repo variables are unset, so every
   publishing leg would skip.
-- **Windows is built but untested.** `build.ps1` and the CI matrix entry exist; no Windows
-  machine has run them.
+- **Windows is written but unrun.** `core/build.cmd` and the CI matrix entry exist; no Windows
+  machine has executed either, here or in CI.
 - **mochallama has not been switched** to consume this core. It keeps its own copy of the
   bridge and ships unchanged — deliberately staged, per ADR-0005.
 - **No NuGet publishing.** The C# binding works and is tested; it is simply not published.

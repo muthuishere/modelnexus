@@ -43,7 +43,7 @@ jobs:
           - { os: ubuntu-latest,   platform: linux-x86_64,   script: sh }
           - { os: macos-latest,    platform: darwin-aarch64, script: sh }
           - { os: macos-13,        platform: darwin-x86_64,  script: sh }
-          - { os: windows-latest,  platform: windows-x86_64, script: ps }
+          - { os: windows-latest,  platform: windows-x86_64, script: cmd }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,9 +53,9 @@ jobs:
         run: ./core/build.sh
 
       - name: Build (windows)
-        if: matrix.script == 'ps'
-        shell: pwsh
-        run: ./core/build.ps1
+        if: matrix.script == 'cmd'
+        shell: cmd
+        run: core\build.cmd
 
       - name: Package
         shell: bash
