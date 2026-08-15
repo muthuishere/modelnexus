@@ -21,6 +21,21 @@ with no library inside them.
 **Do not delete the `natives-*` prerelease.** Go users resolve their runtime library from it at
 first use via `modelnexus.Fetch()`, so it is a runtime dependency, not merely a build input.
 
+## Status of 0.1.0
+
+| leg | state |
+|---|---|
+| **Go** | **PUBLISHED and verified.** `go get github.com/muthuishere/modelnexus/bindings/go@v0.1.0` from the public proxy, `Fetch()` pulls natives from the `natives-b9371` release, inference runs. Needs no credential — it is a tag push using `github.token`. |
+| **npm** | Blocked: `npm error code ENEEDAUTH`. |
+| **PyPI** | Blocked: `invalid-publisher: valid token, but no corresponding publisher`. The OIDC token is fine; PyPI has nothing registered to match it. |
+
+Natives are staged for **linux-x86_64, darwin-aarch64, windows-x86_64** at the
+`natives-b9371` release, all verified as real zips containing the bridge.
+
+Re-running after you add credentials is safe: `gh workflow run release.yml -f version=0.1.0`.
+The Go leg is idempotent (skips an existing tag), PyPI uses `skip-existing`, and npm tolerates
+a genuine already-published conflict while failing on anything else.
+
 ## Owner-only setup (blocks the first publish)
 
 These are web-UI actions on the registries. They cannot be done from the CLI, and until they

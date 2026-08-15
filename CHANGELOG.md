@@ -10,6 +10,12 @@ time.
 
 First public release. Pre-alpha: the API may still move.
 
+**Published: Go only.** `go get github.com/muthuishere/modelnexus/bindings/go@v0.1.0`, verified
+from the public proxy with `Fetch()` pulling the natives and inference running. npm and PyPI
+are built and verified locally but not published — they need registry credentials that only the
+account owner can create; see `PUBLISHING.md`. Native platforms: linux-x86_64, darwin-aarch64,
+windows-x86_64 (Intel macOS is staged by hand — GitHub's runners for it never start).
+
 ### Changed
 - The PyPI **distribution** is `modelnexus-core`, not `modelnexus` — that name is held by an
   unrelated project ("Global AI Model Vault", 1.0.4) and PyPI normalises case-insensitively.
