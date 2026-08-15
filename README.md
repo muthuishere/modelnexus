@@ -16,10 +16,10 @@ UTF-8 strings the caller frees — plus one thin binding per language:
 
 | language | mechanism | status |
 |---|---|---|
-| Go | `purego`, no cgo | **working** — 13 tests, `CGO_ENABLED=0`, `go vet` clean |
-| Python | `ctypes` | **working** — 7 tests |
-| C# | P/Invoke | **working** — smoke run, net8.0 |
-| JS | `koffi` | **working** — 12 tests |
+| Go | `purego`, no cgo | 14 tests, `CGO_ENABLED=0`, `go vet` clean |
+| Python | `ctypes` | 8 tests |
+| C# | P/Invoke, net8.0 | 14 tests |
+| JS | `koffi` | 12 tests |
 
 No Java binding, deliberately ([ADR-0006](docs/adr/0006-no-java-binding.md)) — the JVM is
 served by [mochallama](https://github.com/deemwar-products/mochallama), which already ships a
@@ -37,6 +37,20 @@ against a real 1.5B model and a real reranker: identical output, down to rerank 
 | **LoRA** | load / scale / remove / clear adapters at runtime, several at once |
 | **embeddings** | one vector per input, L2-normalized, choice of pooling |
 | **reranking** | query-document scoring with a reranker model |
+| **log control** | silence the engine, or route its output to your own logger |
+
+### Getting the native library
+
+Python and JS ship it inside the package — install and it works. Go resolves it at runtime,
+because a Go module is a source tree and bundling five platforms would make every `go get`
+pull ~70 MB nobody uses ([ADR-0007](docs/adr/0007-how-natives-reach-each-ecosystem.md)):
+
+```go
+dir, err := modelnexus.Fetch()   // downloads once into the user cache
+```
+
+or set `MODELNEXUS_LIB`, or build it yourself with `core/build.sh`. Skipping the step gives a
+typed error listing every path searched — never a segfault.
 
 ```bash
 task build     # download llama.cpp's prebuilt libs, compile only our bridge (seconds)

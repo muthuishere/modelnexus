@@ -186,3 +186,87 @@ func TestRerankRanksSemantically(t *testing.T) {
 		t.Errorf("top_n=1 returned %d hits", len(top))
 	}
 }
+
+// loraPair returns a base model and a LoRA adapter built for it, or skips.
+//
+// A LoRA is architecture-specific -- it only loads against the base it was trained
+// on -- so this needs its own matched pair rather than reusing MODELNEXUS_MODEL.
+func loraPair(t *testing.T) (string, string) {
+	t.Helper()
+	base := os.Getenv("MODELNEXUS_LORA_BASE")
+	lora := os.Getenv("MODELNEXUS_LORA")
+	if base == "" || lora == "" {
+		t.Skip("set MODELNEXUS_LORA_BASE and MODELNEXUS_LORA to run this test")
+	}
+	for _, p := range []string{base, lora} {
+		if _, err := os.Stat(p); err != nil {
+			t.Skipf("%s is not readable: %v", p, err)
+		}
+	}
+	return base, lora
+}
+
+func TestLoRAFullLifecycleWithARealAdapter(t *testing.T) {
+	base, lora := loraPair(t)
+	chat, err := modelnexus.Open(base)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer chat.Close()
+
+	first, err := chat.LoadLoRA(lora, 1.0)
+	if err != nil {
+		t.Fatalf("LoadLoRA: %v", err)
+	}
+	applied, err := chat.LoRAs()
+	if err != nil {
+		t.Fatalf("LoRAs: %v", err)
+	}
+	if len(applied) != 1 || applied[0].ID != first || applied[0].Scale != 1.0 {
+		t.Fatalf("unexpected adapter state: %+v", applied)
+	}
+
+	if err := chat.SetLoRAScale(first, 0.5); err != nil {
+		t.Fatalf("SetLoRAScale: %v", err)
+	}
+	if applied, _ = chat.LoRAs(); applied[0].Scale != 0.5 {
+		t.Errorf("scale = %v, want 0.5", applied[0].Scale)
+	}
+
+	// Several adapters can be active at once; ids stay stable and independent.
+	second, err := chat.LoadLoRA(lora, 0.25)
+	if err != nil {
+		t.Fatalf("second LoadLoRA: %v", err)
+	}
+	if applied, _ = chat.LoRAs(); len(applied) != 2 {
+		t.Fatalf("expected 2 adapters, got %d", len(applied))
+	}
+
+	if err := chat.RemoveLoRA(second); err != nil {
+		t.Fatalf("RemoveLoRA: %v", err)
+	}
+	if applied, _ = chat.LoRAs(); len(applied) != 1 || applied[0].ID != first {
+		t.Fatalf("after remove: %+v", applied)
+	}
+
+	// Generation must still work with an adapter applied -- the point of loading it.
+	max := 12
+	seed := uint32(1)
+	resp, err := chat.Infer(modelnexus.Request{
+		Messages:  []modelnexus.Message{{Role: "user", Content: "Say the word: apple"}},
+		MaxTokens: &max, Seed: &seed,
+	})
+	if err != nil {
+		t.Fatalf("Infer with adapter: %v", err)
+	}
+	if resp.Text == "" {
+		t.Error("expected text with an adapter applied")
+	}
+
+	if err := chat.ClearLoRAs(); err != nil {
+		t.Fatalf("ClearLoRAs: %v", err)
+	}
+	if applied, _ = chat.LoRAs(); len(applied) != 0 {
+		t.Errorf("expected no adapters after clear, got %d", len(applied))
+	}
+}

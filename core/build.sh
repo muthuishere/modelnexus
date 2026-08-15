@@ -122,8 +122,11 @@ fi
 # But not everything: llama.cpp's release archives also ship libllama-*-impl libraries
 # (cli, server, bench, quantize). Those are tool implementations, not runtime deps of
 # the bridge, and shipping them would roughly double dist/ for nothing.
+# -a, not -f: llama.cpp ships libfoo.dylib -> libfoo.0.dylib -> libfoo.0.0.N.dylib as
+# SYMLINKS. Dereferencing them turns one 7.5 MB library into three, which is most of
+# the weight of a naive dist/ and is pure duplication.
 find "$LIB_SOURCE" -maxdepth 2 \( -name "*$EXT" -o -name "*$EXT.*" -o -name "*.[0-9]*$EXT" \) \
-  ! -name "*-impl*" -exec cp -f {} "$DIST/" \; 2>/dev/null || true
+  ! -name "*-impl*" -exec cp -a {} "$DIST/" \; 2>/dev/null || true
 
 cp "$ROOT/licenses/LICENSE-llama.cpp" "$DIST/" 2>/dev/null || true
 

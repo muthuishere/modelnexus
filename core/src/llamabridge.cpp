@@ -97,6 +97,7 @@ struct llb_embed {
     struct llama_context*   ctx       = nullptr;
     enum llama_pooling_type pooling   = LLAMA_POOLING_TYPE_UNSPECIFIED;
     int                     n_batch   = 512;
+    int                     n_seq_max = 8;   /* sequences packed into one decode */
 };
 
 /* ------------------------------------------------------------------ */
@@ -111,6 +112,56 @@ static void emit(const struct llb_chat* chat, const char* msg) {
 
 static void emit_raw(llb_event_cb cb, void* user_data, const char* msg) {
     if (cb && msg) cb(msg, user_data);
+}
+
+/* ================================================================== */
+/* Logging                                                             */
+/* ================================================================== */
+
+/* A library embedded in someone else's process must not print hundreds of lines
+   to their stderr on every model load. The bridge therefore owns the engine's log
+   sink from first use, defaults to WARN rather than the engine's own default, and
+   lets the host redirect or silence it. */
+
+static int         g_log_level    = LLB_LOG_WARN;
+static llb_log_cb  g_log_cb       = nullptr;
+static void*       g_log_user     = nullptr;
+static bool        g_log_installed = false;
+
+static void bridge_log_sink(enum ggml_log_level level, const char* text, void* /*user*/) {
+    if (!text) return;
+    const int lvl = (int)level;
+    /* GGML_LOG_LEVEL_CONT continues the previous line, so it inherits that line's
+       level rather than being filtered on its own -- filtering it independently
+       would slice messages in half. */
+    if (lvl != (int)GGML_LOG_LEVEL_CONT && lvl < g_log_level) return;
+    if (g_log_cb) {
+        g_log_cb(lvl, text, g_log_user);
+    } else {
+        fputs(text, stderr);
+    }
+}
+
+/* Installed lazily from every entry point that can start the engine, because
+   llama.cpp begins logging during model load and there is no earlier hook. */
+static void ensure_log_sink() {
+    if (g_log_installed) return;
+    llama_log_set(bridge_log_sink, nullptr);
+    g_log_installed = true;
+}
+
+extern "C" void llb_set_log_level(int level) {
+    if (level < LLB_LOG_NONE)  level = LLB_LOG_NONE;
+    if (level > LLB_LOG_ERROR) level = LLB_LOG_ERROR;
+    /* NONE means "emit nothing", so the threshold must sit above every real level. */
+    g_log_level = (level == LLB_LOG_NONE) ? (LLB_LOG_ERROR + 1) : level;
+    ensure_log_sink();
+}
+
+extern "C" void llb_set_log_callback(llb_log_cb cb, void* user_data) {
+    g_log_cb   = cb;
+    g_log_user = user_data;
+    ensure_log_sink();
 }
 
 /* ------------------------------------------------------------------ */
@@ -570,6 +621,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
 
     emit(chat, "create_start");
 
+    ensure_log_sink();
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
@@ -659,6 +711,7 @@ static const char* build_model_info(const tool_caps& tc,
 }
 
 extern "C" const char* llb_model_info(const char* gguf_path) {
+    ensure_log_sink();
     tool_caps tc;  // defaults: all false
 
     if (!gguf_path) {
@@ -900,6 +953,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
 
     emit_raw(event_cb, user_data, "create_start");
 
+    ensure_log_sink();
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
@@ -915,11 +969,13 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     llama_context_params cparams = llama_context_default_params();
     const int n_ctx = cfg.value("n_ctx", 0);
     e->n_batch      = cfg.value("n_batch", 512);
+    e->n_seq_max    = cfg.value("n_seq_max", 8);
     if (n_ctx > 0) cparams.n_ctx = (uint32_t)n_ctx;
     cparams.n_batch      = (uint32_t)e->n_batch;
     /* An embedding context must also be told its batch can hold a whole sequence
        at once: unlike generation there is no incremental decode to fall back on. */
     cparams.n_ubatch     = (uint32_t)e->n_batch;
+    cparams.n_seq_max    = (uint32_t)(e->n_seq_max > 0 ? e->n_seq_max : 1);
     cparams.embeddings   = true;
     cparams.pooling_type = e->pooling;
 
@@ -939,32 +995,45 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     return e;
 }
 
-/* Decode one token sequence and copy out its pooled embedding.
+/* Decode a group of token sequences in ONE batch and copy out their pooled
+   embeddings.
 
-   One sequence per decode: slower than packing many into a batch, but it keeps
-   sequence-to-result mapping trivially correct, which matters more while this is
-   the first version of the capability. Batching is a later optimisation. */
-static bool embed_tokens(llb_embed_t* e,
-                         const std::vector<llama_token>& tokens,
-                         int n_out,
-                         std::vector<float>& out,
-                         std::string& err) {
-    if (tokens.empty()) { err = "empty token sequence"; return false; }
-    if ((int)tokens.size() > e->n_batch) {
-        err = "input of " + std::to_string(tokens.size()) +
+   Each sequence gets its own llama_seq_id, so results map back by position with no
+   bookkeeping. Packing several sequences per decode is what makes embedding a corpus
+   practical -- one decode per text spends most of its time in setup rather than
+   arithmetic.
+
+   n_batch bounds the TOTAL tokens in one decode, so the caller chunks accordingly;
+   n_seq_max bounds how many sequences a context will accept at once. */
+static bool embed_group(llb_embed_t* e,
+                        const std::vector<std::vector<llama_token>>& group,
+                        int n_out,
+                        std::vector<std::vector<float>>& out,
+                        std::string& err) {
+    if (group.empty()) return true;
+
+    size_t total = 0;
+    for (const auto& toks : group) {
+        if (toks.empty()) { err = "empty token sequence"; return false; }
+        total += toks.size();
+    }
+    if ((int)total > e->n_batch) {
+        err = "batch of " + std::to_string(total) +
               " tokens exceeds n_batch " + std::to_string(e->n_batch);
         return false;
     }
 
     llama_memory_clear(llama_get_memory(e->ctx), true);
 
-    llama_batch batch = llama_batch_init((int32_t)tokens.size(), 0, 1);
+    llama_batch batch = llama_batch_init((int32_t)total, 0, (int32_t)group.size());
     common_batch_clear(batch);
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        /* logits=true on every token: pooling reads all of them, and CLS/LAST
-           pooling would otherwise silently read a position that was never
-           computed. */
-        common_batch_add(batch, tokens[i], (llama_pos)i, { 0 }, true);
+    for (size_t seq = 0; seq < group.size(); ++seq) {
+        const auto& toks = group[seq];
+        for (size_t i = 0; i < toks.size(); ++i) {
+            /* logits=true on every token: pooling reads all of them, and CLS/LAST
+               pooling would otherwise read a position that was never computed. */
+            common_batch_add(batch, toks[i], (llama_pos)i, { (llama_seq_id)seq }, true);
+        }
     }
 
     const int rc = llama_decode(e->ctx, batch);
@@ -974,13 +1043,47 @@ static bool embed_tokens(llb_embed_t* e,
         return false;
     }
 
-    const float* emb = llama_get_embeddings_seq(e->ctx, 0);
-    if (!emb) {
-        err = "no pooled embedding was produced (pooling type may be \"none\")";
-        return false;
+    for (size_t seq = 0; seq < group.size(); ++seq) {
+        const float* emb = llama_get_embeddings_seq(e->ctx, (llama_seq_id)seq);
+        if (!emb) {
+            err = "no pooled embedding was produced (pooling type may be \"none\")";
+            return false;
+        }
+        out.emplace_back(emb, emb + n_out);
     }
-    out.assign(emb, emb + n_out);
     return true;
+}
+
+/* Split a list of sequences into groups that each fit inside n_batch, then decode
+   group by group. A single sequence longer than n_batch cannot be split further and
+   is reported rather than silently truncated. */
+static bool embed_all(llb_embed_t* e,
+                      const std::vector<std::vector<llama_token>>& sequences,
+                      int n_out,
+                      std::vector<std::vector<float>>& out,
+                      std::string& err) {
+    const int  max_seqs = e->n_seq_max > 0 ? e->n_seq_max : 1;
+    std::vector<std::vector<llama_token>> group;
+    size_t group_tokens = 0;
+
+    for (const auto& toks : sequences) {
+        if ((int)toks.size() > e->n_batch) {
+            err = "input of " + std::to_string(toks.size()) +
+                  " tokens exceeds n_batch " + std::to_string(e->n_batch) +
+                  "; raise n_batch or shorten the input";
+            return false;
+        }
+        const bool would_overflow_tokens = (int)(group_tokens + toks.size()) > e->n_batch;
+        const bool would_overflow_seqs   = (int)group.size() + 1 > max_seqs;
+        if (!group.empty() && (would_overflow_tokens || would_overflow_seqs)) {
+            if (!embed_group(e, group, n_out, out, err)) return false;
+            group.clear();
+            group_tokens = 0;
+        }
+        group_tokens += toks.size();
+        group.push_back(toks);
+    }
+    return embed_group(e, group, n_out, out, err);
 }
 
 extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
@@ -1014,18 +1117,23 @@ extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
     const bool normalize = req.value("normalize", true);
     const int  n_embd    = llama_model_n_embd(e->model);
 
-    json vectors = json::array();
-    int  total_tokens = 0;
-
+    std::vector<std::vector<llama_token>> sequences;
+    sequences.reserve(inputs.size());
+    int total_tokens = 0;
     for (const auto& text : inputs) {
-        std::vector<llama_token> tokens = common_tokenize(e->ctx, text, true, true);
-        total_tokens += (int)tokens.size();
+        sequences.push_back(common_tokenize(e->ctx, text, true, true));
+        total_tokens += (int)sequences.back().size();
+    }
 
-        std::vector<float> vec;
-        std::string err;
-        if (!embed_tokens(e, tokens, n_embd, vec, err)) {
-            return build_error("EMBED_FAILED", err);
-        }
+    std::vector<std::vector<float>> raw;
+    raw.reserve(inputs.size());
+    std::string err;
+    if (!embed_all(e, sequences, n_embd, raw, err)) {
+        return build_error("EMBED_FAILED", err);
+    }
+
+    json vectors = json::array();
+    for (auto& vec : raw) {
         if (normalize) {
             std::vector<float> normed(vec.size());
             common_embd_normalize(vec.data(), normed.data(), (int)vec.size(), 2);
@@ -1098,15 +1206,16 @@ extern "C" const char* llb_rerank(llb_embed_t* e, const char* request_json) {
 
         total_tokens += (int)pair.size();
 
-        std::vector<float> score;
-        std::string err;
         /* Under RANK pooling the sequence embedding is the classifier output --
            n_cls_out floats, normally one. */
         const int n_cls = (int)llama_model_n_cls_out(e->model);
-        if (!embed_tokens(e, pair, n_cls > 0 ? n_cls : 1, score, err)) {
+        std::vector<std::vector<float>> scored_out;
+        std::string err;
+        if (!embed_group(e, { pair }, n_cls > 0 ? n_cls : 1, scored_out, err)) {
             return build_error("RERANK_FAILED", err);
         }
-        results.push_back({ (int)i, score.empty() ? 0.0f : score[0] });
+        const float value = (scored_out.empty() || scored_out[0].empty()) ? 0.0f : scored_out[0][0];
+        results.push_back({ (int)i, value });
     }
 
     std::sort(results.begin(), results.end(),

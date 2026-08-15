@@ -128,6 +128,16 @@ internal static partial class Native
     [DllImport(Lib, EntryPoint = "llb_string_free", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void StringFree(IntPtr s);
 
+    [DllImport(Lib, EntryPoint = "llb_set_log_level", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void SetLogLevel(int level);
+
+    // void (*)(int level, const char* text, void* user_data)
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void LogCallback(int level, IntPtr text, IntPtr userData);
+
+    [DllImport(Lib, EntryPoint = "llb_set_log_callback", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void SetLogCallback(LogCallback? cb, IntPtr userData);
+
     /// <summary>Copy a core-owned string and free the original.</summary>
     /// <remarks>
     /// Copy and free together, in one place, so the free cannot be forgotten at one

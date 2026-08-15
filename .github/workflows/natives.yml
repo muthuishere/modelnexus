@@ -1,0 +1,95 @@
+name: natives
+
+# TIER 1 of the two-tier release (ADR-0004). Rare, slow, and the only thing that
+# compiles.
+#
+# Builds the per-platform native closure and parks it in a DURABLE prerelease keyed by
+# the pinned llama.cpp tag. Release runs then download this and never compile — which
+# is what makes cutting a version take minutes instead of an hour, and is the only way
+# darwin-x86_64 gets covered at all when no CI runner exists for it.
+#
+# Triggered only by changes to the C sources or the build scripts. Re-running is safe:
+# assets are overwritten in place.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - '.github/workflows/natives.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      llama_tag: ${{ steps.pin.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pin
+        # One source of truth for the pin: build.sh --print-tag. Anything else parsing
+        # that file with sed is a second source of truth waiting to drift.
+        run: echo "tag=$(sh core/build.sh --print-tag)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,   platform: linux-x86_64,   script: sh }
+          - { os: macos-latest,    platform: darwin-aarch64, script: sh }
+          - { os: macos-13,        platform: darwin-x86_64,  script: sh }
+          - { os: windows-latest,  platform: windows-x86_64, script: ps }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (unix)
+        if: matrix.script == 'sh'
+        run: ./core/build.sh
+
+      - name: Build (windows)
+        if: matrix.script == 'ps'
+        shell: pwsh
+        run: ./core/build.ps1
+
+      - name: Package
+        shell: bash
+        run: |
+          cd core/dist
+          # -y preserves the symlinks llama.cpp ships; dereferencing them triples the
+          # size of the largest library for nothing.
+          zip -ry "../../natives-${{ matrix.platform }}.zip" "${{ matrix.platform }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: natives-${{ matrix.platform }}
+          path: natives-${{ matrix.platform }}.zip
+
+  publish:
+    needs: [tag, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+
+      - name: Stage the durable prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: natives-${{ needs.tag.outputs.llama_tag }}
+        run: |
+          # Durable and tag-keyed: Go users resolve their runtime library from this
+          # release at first use (ADR-0007), so it must not be deleted or retagged.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --prerelease \
+              --title "native closure for llama.cpp ${{ needs.tag.outputs.llama_tag }}" \
+              --notes "Prebuilt modelnexus bridge + llama.cpp runtime, per platform. Consumed by release.yml (which never compiles) and by the Go binding Fetch() at runtime. DO NOT DELETE: this is a runtime dependency for Go users, not merely a build input."
+          fi
+          gh release upload "$TAG" dist/*.zip --clobber
+          echo "staged: $TAG"
+          gh release view "$TAG" --json assets -q '.assets[].name'

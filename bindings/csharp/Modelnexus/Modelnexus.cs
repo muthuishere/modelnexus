@@ -100,9 +100,48 @@ internal static class Json
     }
 }
 
+/// <summary>How much the inference engine is allowed to say.</summary>
+public enum LogLevel
+{
+    /// <summary>Silence the engine entirely.</summary>
+    None = 0,
+    Debug = 1,
+    Info = 2,
+    /// <summary>The default. A library should be quiet unless asked.</summary>
+    Warn = 3,
+    Error = 4
+}
+
 /// <summary>Entry points that need no loaded model.</summary>
 public static class Modelnexus
 {
+    // The core retains the log delegate until it is replaced, so it is held in a
+    // static field. A local would be collected while native code still holds the
+    // pointer -- the same rule as the engine event callback.
+    private static Native.LogCallback? _logCallback;
+
+    /// <summary>
+    /// Set how much the engine logs. Defaults to <see cref="LogLevel.Warn"/>.
+    /// </summary>
+    /// <remarks>
+    /// Call before loading a model: llama.cpp starts logging during load, so after
+    /// is too late to silence it.
+    /// </remarks>
+    public static void SetLogLevel(LogLevel level) => Native.SetLogLevel((int)level);
+
+    /// <summary>Route engine log output to a handler instead of stderr. Null restores stderr.</summary>
+    public static void SetLogHandler(Action<LogLevel, string>? handler)
+    {
+        if (handler is null)
+        {
+            Native.SetLogCallback(null, IntPtr.Zero);
+            _logCallback = null;
+            return;
+        }
+        _logCallback = (level, text, _) => handler((LogLevel)level, Native.BorrowString(text));
+        Native.SetLogCallback(_logCallback, IntPtr.Zero);
+    }
+
     /// <summary>Bridge version and the llama.cpp tag it was linked against.</summary>
     public static string Version() => Native.BorrowString(Native.Version());
 

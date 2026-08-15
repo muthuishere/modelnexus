@@ -15,10 +15,21 @@ import ctypes
 import json
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from ._lib import EVENT_CB, TOKEN_CB, NativeLibraryNotFound, load, platform_key, take_string
+from ._lib import (
+    EVENT_CB,
+    LOG_CB,
+    TOKEN_CB,
+    NativeLibraryNotFound,
+    load,
+    platform_key,
+    take_string,
+)
 
 __all__ = [
     "Chat",
+    "LogLevel",
+    "set_log_level",
+    "set_log_handler",
     "Embedder",
     "ModelError",
     "ToolsUnsupportedError",
@@ -54,6 +65,50 @@ class ToolsUnsupportedError(ModelError):
             "MODEL_NOT_TOOL_CAPABLE",
             f"{path} has no tool-calling chat template",
         )
+
+
+class LogLevel:
+    """How much the inference engine is allowed to say.
+
+    The bridge defaults to ``WARN`` rather than llama.cpp's own default: a library
+    embedded in someone else's process should be quiet unless asked.
+    """
+
+    NONE = 0
+    DEBUG = 1
+    INFO = 2
+    WARN = 3
+    ERROR = 4
+
+
+def set_log_level(level: int) -> None:
+    """Set how much the engine logs.
+
+    Call before loading a model -- llama.cpp starts logging during load, so
+    afterwards is too late to silence it.
+    """
+    load().llb_set_log_level(int(level))
+
+
+_log_handler_ref: Any = None
+
+
+def set_log_handler(handler: Callable[[int, str], None] | None) -> None:
+    """Route engine log output to a handler instead of stderr. ``None`` restores stderr."""
+    global _log_handler_ref
+    lib = load()
+    if handler is None:
+        lib.llb_set_log_callback(ctypes.cast(None, LOG_CB), None)
+        _log_handler_ref = None
+        return
+
+    def _on_log(level: int, text: bytes, _user: Any) -> None:
+        handler(level, text.decode("utf-8", "replace") if text else "")
+
+    # The core retains this pointer until it is replaced, so it is held at module
+    # scope. A local would be collected while native code still holds it.
+    _log_handler_ref = LOG_CB(_on_log)
+    lib.llb_set_log_callback(_log_handler_ref, None)
 
 
 def version() -> str:

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
 // ---------------------------------------------------------------- LoRA
@@ -281,5 +284,74 @@ func (e *Embedder) Close() error {
 	llbEmbedDestroy(e.handle)
 	e.handle = 0
 	releaseSink(eventSink, e.eventID)
+	return nil
+}
+
+// ---------------------------------------------------------------- logging
+
+// LogLevel is how much the inference engine is allowed to say.
+//
+// The bridge defaults to LogWarn rather than llama.cpp's own default: a library
+// embedded in someone else's process should be quiet unless asked.
+type LogLevel int32
+
+const (
+	// LogNone silences the engine entirely.
+	LogNone  LogLevel = 0
+	LogDebug LogLevel = 1
+	LogInfo  LogLevel = 2
+	// LogWarn is the default.
+	LogWarn  LogLevel = 3
+	LogError LogLevel = 4
+)
+
+// SetLogLevel sets how much the engine logs.
+//
+// Call it before loading a model: llama.cpp starts logging during load, so
+// afterwards is too late to silence it.
+func SetLogLevel(level LogLevel) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	llbSetLogLevel(int32(level))
+	return nil
+}
+
+// The core retains the log callback until it is replaced, and purego trampolines
+// are never freed -- so there is exactly ONE, registered on first use, with the
+// current handler swapped behind a mutex.
+var (
+	logMu          sync.Mutex
+	logHandler     func(LogLevel, string)
+	logTrampoline  uintptr
+	logRegisterOne sync.Once
+)
+
+// SetLogHandler routes engine log output to fn instead of stderr.
+// Passing nil restores stderr.
+func SetLogHandler(fn func(level LogLevel, text string)) error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	logMu.Lock()
+	logHandler = fn
+	logMu.Unlock()
+
+	if fn == nil {
+		llbSetLogCallback(0, 0)
+		return nil
+	}
+	logRegisterOne.Do(func() {
+		logTrampoline = purego.NewCallback(func(level int32, text unsafe.Pointer, _ uintptr) uintptr {
+			logMu.Lock()
+			h := logHandler
+			logMu.Unlock()
+			if h != nil {
+				h(LogLevel(level), goString(text))
+			}
+			return 0
+		})
+	})
+	llbSetLogCallback(logTrampoline, 0)
 	return nil
 }

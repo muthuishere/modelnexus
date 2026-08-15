@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modelnexus"
+version = "0.0.1"
+description = "Local LLM inference in your own process — llama.cpp via a C ABI. No daemon, no port."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Muthukumaran Navaneethakrishnan" }]
+keywords = ["llm", "llama.cpp", "gguf", "embeddings", "reranking", "lora", "local"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# No runtime dependencies: the binding is ctypes over a bundled native library.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/muthuishere/modelnexus"
+Source = "https://github.com/muthuishere/modelnexus"
+
+[tool.setuptools.packages.find]
+include = ["modelnexus*"]
+
+# The native library travels inside the wheel (ADR-0007). A wheel is exactly the
+# right vehicle for this, which is why Python needs no fetch step at all.
+[tool.setuptools.package-data]
+modelnexus = ["native/*/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

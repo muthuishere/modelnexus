@@ -41,6 +41,52 @@ function check(raw) {
   return parsed;
 }
 
+/**
+ * How much the inference engine is allowed to say.
+ *
+ * The bridge defaults to WARN rather than llama.cpp's own default: a library
+ * embedded in someone else's process should be quiet unless asked.
+ */
+export const LogLevel = Object.freeze({
+  NONE: 0,
+  DEBUG: 1,
+  INFO: 2,
+  WARN: 3,
+  ERROR: 4,
+});
+
+/**
+ * Set how much the engine logs.
+ *
+ * Call before loading a model -- llama.cpp starts logging during load, so
+ * afterwards is too late to silence it.
+ */
+export function setLogLevel(level) {
+  lib().setLogLevel(level);
+}
+
+// The core retains the log callback until it is replaced, so the registration is
+// held at module scope and released only when it is swapped out.
+let logCallbackRef = null;
+
+/** Route engine log output to a handler instead of stderr. Pass null to restore stderr. */
+export function setLogHandler(handler) {
+  const l = lib();
+  if (logCallbackRef) {
+    koffi.unregister(logCallbackRef);
+    logCallbackRef = null;
+  }
+  if (!handler) {
+    l.setLogCallback(null, null);
+    return;
+  }
+  logCallbackRef = koffi.register(
+    (level, text) => handler(level, text ?? ''),
+    koffi.pointer(l.LogCallback),
+  );
+  l.setLogCallback(logCallbackRef, null);
+}
+
 /** Bridge version and the llama.cpp tag it was linked against. */
 export function version() {
   return lib().version();

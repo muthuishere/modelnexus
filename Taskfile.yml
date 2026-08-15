@@ -29,6 +29,12 @@ vars:
   # A reranker GGUF (needs "rank" pooling). Rerank tests skip without it.
   RERANKER:
     sh: 'echo "${RERANKER:-$HOME/.chatbot_models/bge-reranker-v2-m3-Q4_K_M.gguf}"'
+  # A LoRA adapter and the base it was built for. An adapter is architecture-specific,
+  # so these are a matched PAIR -- an adapter will not load against an arbitrary model.
+  LORA_BASE:
+    sh: 'echo "${LORA_BASE:-$HOME/.chatbot_models/qwen2.5-3b-instruct-q4_k_m.gguf}"'
+  LORA:
+    sh: 'echo "${LORA:-$HOME/.chatbot_models/LoRA-Qwen2.5-3B-Instruct-abliterated-f16.gguf}"'
 
 tasks:
   default:
@@ -117,7 +123,7 @@ tasks:
     silent: true
     cmds:
       - |
-        for pair in "chat:{{.MODEL}}" "reranker:{{.RERANKER}}"; do
+        for pair in "chat:{{.MODEL}}" "reranker:{{.RERANKER}}" "lora-base:{{.LORA_BASE}}" "lora:{{.LORA}}"; do
           name=${pair%%:*}; path=${pair#*:}
           if [ -f "$path" ]; then printf "  %-9s present  %s\n" "$name" "$path"
           else printf "  %-9s MISSING  %s\n     -> tests needing it will SKIP, not fail\n" "$name" "$path"; fi
@@ -140,6 +146,8 @@ tasks:
     env:
       MODELNEXUS_MODEL: '{{.MODEL}}'
       MODELNEXUS_RERANKER: '{{.RERANKER}}'
+      MODELNEXUS_LORA_BASE: '{{.LORA_BASE}}'
+      MODELNEXUS_LORA: '{{.LORA}}'
 
   test:go:
     desc: Go binding (purego, CGO_ENABLED=0) tests
@@ -148,15 +156,19 @@ tasks:
       CGO_ENABLED: '0'
       MODELNEXUS_MODEL: '{{.MODEL}}'
       MODELNEXUS_RERANKER: '{{.RERANKER}}'
+      MODELNEXUS_LORA_BASE: '{{.LORA_BASE}}'
+      MODELNEXUS_LORA: '{{.LORA}}'
     cmds: ['go vet ./...', 'go test ./...']
 
   test:csharp:
-    desc: C# binding (P/Invoke) smoke run
-    dir: bindings/csharp/Smoke
+    desc: C# binding (P/Invoke) xunit suite
+    dir: bindings/csharp
     env:
       MODELNEXUS_MODEL: '{{.MODEL}}'
       MODELNEXUS_RERANKER: '{{.RERANKER}}'
-    cmds: ['dotnet run -v q --nologo']
+      MODELNEXUS_LORA_BASE: '{{.LORA_BASE}}'
+      MODELNEXUS_LORA: '{{.LORA}}'
+    cmds: ['dotnet test Modelnexus.Tests/Modelnexus.Tests.csproj -v q --nologo']
 
   test:js:
     desc: JS binding (koffi) tests
@@ -164,6 +176,8 @@ tasks:
     env:
       MODELNEXUS_MODEL: '{{.MODEL}}'
       MODELNEXUS_RERANKER: '{{.RERANKER}}'
+      MODELNEXUS_LORA_BASE: '{{.LORA_BASE}}'
+      MODELNEXUS_LORA: '{{.LORA}}'
     cmds: ['npm install --silent', 'npm test --silent']
 
   # ---------------------------------------------------------------- publishing

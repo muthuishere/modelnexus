@@ -118,6 +118,9 @@ var (
 	llbEmbed        func(embed uintptr, req string) unsafe.Pointer
 	llbRerank       func(embed uintptr, req string) unsafe.Pointer
 	llbEmbedDestroy func(embed uintptr)
+
+	llbSetLogLevel    func(level int32)
+	llbSetLogCallback func(cb uintptr, userData uintptr)
 )
 
 func ensureLoaded() error {
@@ -147,6 +150,8 @@ func ensureLoaded() error {
 			purego.RegisterLibFunc(&llbEmbed, handle, "llb_embed")
 			purego.RegisterLibFunc(&llbRerank, handle, "llb_rerank")
 			purego.RegisterLibFunc(&llbEmbedDestroy, handle, "llb_embed_destroy")
+			purego.RegisterLibFunc(&llbSetLogLevel, handle, "llb_set_log_level")
+			purego.RegisterLibFunc(&llbSetLogCallback, handle, "llb_set_log_callback")
 			return
 		}
 		loadErr = &ErrNativeLibraryNotFound{Searched: searched, Cause: lastErr}

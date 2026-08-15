@@ -174,6 +174,49 @@ void llb_string_free(const char* s);
 void llb_chat_destroy(llb_chat_t* chat);
 
 /* ------------------------------------------------------------------ */
+/* Logging                                                             */
+/*                                                                     */
+/* llama.cpp writes to stderr by default -- hundreds of lines per model */
+/* load. That is fine for a CLI and unacceptable for a library embedded */
+/* in someone else's application, which is what this is. So the bridge  */
+/* installs its own log sink and gives the host control over it.        */
+/*                                                                     */
+/* Levels match ggml's: 0 none, 1 debug, 2 info, 3 warn, 4 error.       */
+/* The bridge DEFAULTS TO WARN, not the engine's default -- a library   */
+/* should be quiet unless asked, and a host that wants the firehose can */
+/* ask for it.                                                          */
+/*                                                                     */
+/* Call llb_set_log_level(LLB_LOG_NONE) to silence the engine entirely. */
+/* ------------------------------------------------------------------ */
+
+#define LLB_LOG_NONE  0
+#define LLB_LOG_DEBUG 1
+#define LLB_LOG_INFO  2
+#define LLB_LOG_WARN  3
+#define LLB_LOG_ERROR 4
+
+/*
+ * Set the minimum level the engine emits. Messages below it are dropped.
+ * Safe to call at any time, including before any model is loaded.
+ */
+void llb_set_log_level(int level);
+
+/*
+ * Route engine log output to a callback instead of stderr.
+ *
+ * The callback receives the level and a NUL-terminated message; the pointer
+ * is valid only for the duration of the call. Pass NULL to restore stderr.
+ * The level filter set by llb_set_log_level still applies.
+ *
+ * The bridge RETAINS this pointer until it is replaced or cleared, so the
+ * caller must keep the callable alive for that whole period -- the same rule
+ * as llb_chat_create's event callback.
+ */
+typedef void (*llb_log_cb)(int level, const char* text, void* user_data);
+
+void llb_set_log_callback(llb_log_cb cb, void* user_data);
+
+/* ------------------------------------------------------------------ */
 /* LoRA adapters                                                       */
 /*                                                                     */
 /* One entry point for every adapter operation, dispatched on an "op"  */

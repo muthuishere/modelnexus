@@ -1,0 +1,189 @@
+name: release
+
+# TIER 2 of the two-tier release (ADR-0004). This workflow NEVER COMPILES.
+#
+# It downloads the natives staged by natives.yml, packages them per ecosystem, and
+# publishes. That is what keeps a release to minutes, and it is why a broken release
+# is fixed by re-running rather than by rebuilding the world.
+#
+# Publishing targets are Go, Python and JavaScript. C# has a working binding but no
+# NuGet leg -- deliberate, not an omission (ADR-0007).
+#
+# Each leg publishes ONLY if its repo variable is true: ENABLE_GO, ENABLE_PYPI,
+# ENABLE_NPM. A leg that is off is skipped silently, so CHECK THE JOB LIST before
+# concluding a release worked -- a green run with three skips is not a release.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, without the leading v'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write        # OIDC trusted publishing for PyPI and npm
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      llama_tag: ${{ steps.v.outputs.llama_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "llama_tag=$(sh core/build.sh --print-tag)" >> "$GITHUB_OUTPUT"
+
+      - name: Every manifest must agree with the tag
+        run: |
+          # This is the guard against a partial bump -- the failure mode the whole
+          # release runbook exists to prevent. One version, every package, or no release.
+          version="${{ steps.v.outputs.version }}"
+          fail=0
+          js=$(node -p "require('./bindings/js/package.json').version")
+          [ "$js" = "$version" ] || { echo "js package.json is $js, expected $version"; fail=1; }
+          py=$(grep -m1 '^version' bindings/python/pyproject.toml | cut -d'"' -f2)
+          [ "$py" = "$version" ] || { echo "pyproject.toml is $py, expected $version"; fail=1; }
+          exit $fail
+
+      - name: The natives for this llama.cpp tag must already be staged
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          tag="natives-${{ steps.v.outputs.llama_tag }}"
+          # If this is missing, natives.yml has not run for the current pin. Fail here
+          # rather than publish packages with no library inside them.
+          gh release view "$tag" >/dev/null 2>&1 || {
+            echo "::error::$tag is not staged. Run the natives workflow first."; exit 1; }
+          gh release view "$tag" --json assets -q '.assets[].name'
+
+  natives:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the staged natives (no compilation)
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          mkdir -p staged && cd staged
+          gh release download "natives-${{ needs.preflight.outputs.llama_tag }}" --pattern '*.zip'
+          for z in *.zip; do unzip -qo "$z"; done
+          ls -1
+      - uses: actions/upload-artifact@v4
+        with: { name: natives, path: staged }
+
+  publish-go:
+    needs: [preflight, natives]
+    if: vars.ENABLE_GO == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag the Go submodule
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          # Go publishes by tag; there is nothing to upload. The natives are NOT in the
+          # module (ADR-0007) -- the binding resolves them at runtime.
+          tag="bindings/go/v${{ needs.preflight.outputs.version }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/$tag$"; then
+            echo "$tag already exists; nothing to do (idempotent)"
+          else
+            git tag "$tag" && git push origin "$tag"
+          fi
+
+  publish-pypi:
+    needs: [preflight, natives]
+    if: vars.ENABLE_PYPI == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: natives, path: staged }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - name: Build one wheel per platform
+        run: |
+          python -m pip install --quiet build wheel
+          cd bindings/python
+          for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64; do
+            src="../../staged/$plat"
+            [ -d "$src" ] || { echo "skipping $plat (not staged)"; continue; }
+            rm -rf modelnexus/native && mkdir -p modelnexus/native
+            cp -a "$src" modelnexus/native/
+            # A wheel is exactly the right vehicle for a native library; that is what
+            # platform tags are for.
+            case "$plat" in
+              linux-x86_64)   tag=manylinux_2_28_x86_64 ;;
+              darwin-aarch64) tag=macosx_11_0_arm64 ;;
+              darwin-x86_64)  tag=macosx_10_15_x86_64 ;;
+              windows-x86_64) tag=win_amd64 ;;
+            esac
+            python -m build --wheel --outdir dist_all
+            for w in dist_all/*-any.whl; do
+              [ -e "$w" ] || continue
+              mv "$w" "$(echo "$w" | sed "s/-any.whl/-$tag.whl/")"
+            done
+          done
+          ls -1 dist_all
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: bindings/python/dist_all
+          skip-existing: true
+
+  publish-npm:
+    needs: [preflight, natives]
+    if: vars.ENABLE_NPM == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: natives, path: staged }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish one package per platform, then the launcher
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -e
+          # optionalDependencies: npm installs only the platform that matches and
+          # skips the rest without erroring. Proven pattern -- mochallama's CLI ships
+          # this way today.
+          for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64; do
+            src="staged/$plat"
+            [ -d "$src" ] || { echo "skipping $plat (not staged)"; continue; }
+            case "$plat" in
+              linux-x86_64)   os=linux;  cpu=x64 ;;
+              darwin-aarch64) os=darwin; cpu=arm64 ;;
+              darwin-x86_64)  os=darwin; cpu=x64 ;;
+              windows-x86_64) os=win32;  cpu=x64 ;;
+            esac
+            pkg="pkg-$plat"; mkdir -p "$pkg/native/$plat"
+            cp -a "$src"/. "$pkg/native/$plat/"
+            cat > "$pkg/package.json" <<JSON
+          {
+            "name": "@muthuishere/modelnexus-$plat",
+            "version": "$VERSION",
+            "description": "modelnexus native library for $plat",
+            "os": ["$os"],
+            "cpu": ["$cpu"],
+            "files": ["native"],
+            "license": "MIT"
+          }
+          JSON
+            npm publish "$pkg" --access public || echo "already published, skipping"
+          done
+          npm publish bindings/js --access public || echo "already published, skipping"

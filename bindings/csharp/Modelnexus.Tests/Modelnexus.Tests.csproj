@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- The library targets net8.0 for reach; tests run on whatever runtime exists. -->
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- xunit v2 cannot skip a test at runtime; this adds [SkippableFact] + Skip.If.
+         Without it a "skipped" test would report as PASSED, which is the failure mode
+         that hid a misconfigured model path in the Taskfile. -->
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.23" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Modelnexus/Modelnexus.csproj" />
+  </ItemGroup>
+</Project>

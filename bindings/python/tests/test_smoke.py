@@ -96,3 +96,51 @@ def test_use_after_close_is_rejected():
     with pytest.raises(mx.ModelError) as excinfo:
         chat.infer([{"role": "user", "content": "hi"}])
     assert excinfo.value.code == "ENGINE_CLOSED"
+
+
+def lora_pair() -> tuple[str, str]:
+    """A base model and a LoRA adapter built for it, or skip.
+
+    A LoRA is architecture-specific: it only loads against the base it was trained
+    on, so this needs its own matched pair rather than reusing MODELNEXUS_MODEL.
+    """
+    base = os.path.expanduser(os.environ.get("MODELNEXUS_LORA_BASE", ""))
+    lora = os.path.expanduser(os.environ.get("MODELNEXUS_LORA", ""))
+    if not base or not lora:
+        pytest.skip("set MODELNEXUS_LORA_BASE and MODELNEXUS_LORA to run this test")
+    if not os.path.isfile(base) or not os.path.isfile(lora):
+        pytest.skip("MODELNEXUS_LORA_BASE / MODELNEXUS_LORA are not both readable")
+    return base, lora
+
+
+def test_lora_full_lifecycle_with_a_real_adapter():
+    base, lora = lora_pair()
+    with mx.Chat(base) as chat:
+        assert chat.loras() == []
+
+        first = chat.load_lora(lora, scale=1.0)
+        applied = chat.loras()
+        assert len(applied) == 1
+        assert applied[0]["id"] == first
+        assert applied[0]["scale"] == 1.0
+
+        chat.set_lora_scale(first, 0.5)
+        assert chat.loras()[0]["scale"] == 0.5
+
+        # Several adapters can be active at once; ids are stable and independent.
+        second = chat.load_lora(lora, scale=0.25)
+        assert [a["id"] for a in chat.loras()] == [first, second]
+
+        chat.remove_lora(second)
+        assert [a["id"] for a in chat.loras()] == [first]
+
+        # Generation must still work with an adapter applied -- the point of loading it.
+        r = chat.infer([{"role": "user", "content": "Say the word: apple"}], max_tokens=12, seed=1)
+        assert r["type"] == "assistant_text"
+        assert r["text"]
+
+        chat.clear_loras()
+        assert chat.loras() == []
+
+        r2 = chat.infer([{"role": "user", "content": "Say the word: apple"}], max_tokens=12, seed=1)
+        assert r2["type"] == "assistant_text"

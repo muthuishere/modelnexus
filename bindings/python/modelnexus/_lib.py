@@ -155,6 +155,12 @@ def _bind_signatures(lib: ctypes.CDLL) -> None:
     lib.llb_embed_destroy.argtypes = [ctypes.c_void_p]
     lib.llb_embed_destroy.restype = None
 
+    lib.llb_set_log_level.argtypes = [ctypes.c_int]
+    lib.llb_set_log_level.restype = None
+
+    lib.llb_set_log_callback.argtypes = [LOG_CB, ctypes.c_void_p]
+    lib.llb_set_log_callback.restype = None
+
     lib.llb_string_free.argtypes = [ctypes.c_void_p]
     lib.llb_string_free.restype = None
 
@@ -166,6 +172,8 @@ def _bind_signatures(lib: ctypes.CDLL) -> None:
 EVENT_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
 # void (*)(const char* token_piece, void* user_data)
 TOKEN_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
+# void (*)(int level, const char* text, void* user_data)
+LOG_CB = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
 
 
 def take_string(lib: ctypes.CDLL, ptr: int | None) -> str:

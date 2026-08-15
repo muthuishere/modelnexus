@@ -87,10 +87,12 @@ export function lib() {
     }
 
     const StringCallback = koffi.proto('void StringCallback(const char *text, void *user)');
+    const LogCallback = koffi.proto('void LogCallback(int level, const char *text, void *user)');
 
     bound = {
       koffi,
       StringCallback,
+      LogCallback,
       version: native.func('const char *llb_version()'),
       modelInfo: native.func('void *llb_model_info(const char *path)'),
       chatCreate: native.func('void *llb_chat_create(const char *path, StringCallback *cb, void *user)'),
@@ -107,6 +109,8 @@ export function lib() {
       rerank: native.func('void *llb_rerank(void *embed, const char *request)'),
       embedDestroy: native.func('void llb_embed_destroy(void *embed)'),
       stringFree: native.func('void llb_string_free(void *s)'),
+      setLogLevel: native.func('void llb_set_log_level(int level)'),
+      setLogCallback: native.func('void llb_set_log_callback(LogCallback *cb, void *user)'),
     };
     return bound;
   }
