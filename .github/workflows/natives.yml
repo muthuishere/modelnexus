@@ -32,7 +32,15 @@ jobs:
       - id: pin
         # One source of truth for the pin: build.sh --print-tag. Anything else parsing
         # that file with sed is a second source of truth waiting to drift.
-        run: echo "tag=$(sh core/build.sh --print-tag)" >> "$GITHUB_OUTPUT"
+        #
+        # bash, NOT sh: build.sh opens with `set -euo pipefail`, and dash (Ubuntu's /bin/sh)
+        # has no pipefail, so `sh build.sh --print-tag` dies before printing and the tag
+        # silently becomes empty. That produced a "natives-" release tag and an HTTP 422.
+        # It passed locally because macOS /bin/sh is bash in POSIX mode.
+        run: |
+          tag="$(bash core/build.sh --print-tag)"
+          [ -n "$tag" ] || { echo "::error::could not read the llama.cpp pin"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   build:
     needs: tag

@@ -42,7 +42,10 @@ jobs:
             version="${{ inputs.version }}"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "llama_tag=$(sh core/build.sh --print-tag)" >> "$GITHUB_OUTPUT"
+          # bash, not sh -- see natives.yml: dash has no pipefail and build.sh uses it.
+          llama_tag="$(bash core/build.sh --print-tag)"
+          [ -n "$llama_tag" ] || { echo "::error::could not read the llama.cpp pin"; exit 1; }
+          echo "llama_tag=$llama_tag" >> "$GITHUB_OUTPUT"
 
       - name: Every manifest must agree with the tag
         run: |

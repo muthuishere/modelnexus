@@ -86,7 +86,7 @@ tasks:
   llama:pinned:
     desc: Show the llama.cpp tag this build is pinned to
     silent: true
-    cmds: ['echo "pinned: $(sh core/build.sh --print-tag)"']
+    cmds: ['echo "pinned: $(bash core/build.sh --print-tag)"']
 
   llama:latest:
     desc: Show llama.cpp's latest upstream release (does NOT change the pin)
@@ -97,7 +97,7 @@ tasks:
         # early and curl dies with "(56) Failure writing output to destination".
         body=$(curl -fsSL https://api.github.com/repos/ggml-org/llama.cpp/releases/latest)
         latest=$(printf '%s' "$body" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-        current=$(sh core/build.sh --print-tag)
+        current=$(bash core/build.sh --print-tag)
         echo "pinned:   $current"
         echo "upstream: $latest"
         [ "$latest" = "$current" ] && echo "→ up to date" || echo "→ move with: task llama:pin TAG=$latest"
