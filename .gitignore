@@ -22,3 +22,8 @@ core/build/
 core/dist/
 node_modules/
 package-lock.json
+
+# local wheel-build scratch (natives are injected by release.yml)
+bindings/python/modelnexus/native/
+bindings/python/dist*/
+bindings/python/*.egg-info/
