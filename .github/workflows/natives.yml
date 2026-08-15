@@ -80,12 +80,20 @@ jobs:
             # -y preserves the symlinks llama.cpp ships on Unix; dereferencing them
             # triples the size of the largest library for nothing.
             zip -ry "$out" "${{ matrix.platform }}"
+          elif command -v 7z >/dev/null; then
+            # Windows. NOT `tar -a -cf`: this step runs under Git Bash, whose tar is
+            # GNU tar, and GNU tar ignores -a for zip -- it happily writes a TAR file
+            # named .zip, which only fails later when the release job tries to unzip
+            # it ("End-of-central-directory signature not found"). 7z is present on
+            # the Windows runners and writes a real zip.
+            7z a -tzip "$out" "${{ matrix.platform }}" >/dev/null
           else
-            # Windows runners have no zip. tar there is bsdtar, which writes zip when
-            # -a infers the format from the extension. No symlinks to preserve on
-            # Windows anyway -- the build emits plain DLLs.
             tar -a -cf "$out" "${{ matrix.platform }}"
           fi
+          # Prove it is actually a zip before it becomes a release asset -- a bad
+          # archive here is only discovered at publish time otherwise.
+          python3 -c "import sys,zipfile; sys.exit(0 if zipfile.is_zipfile('$out') else 1)" \
+            || { echo "::error::$out is not a valid zip"; exit 1; }
           ls -l "$out"
 
       - uses: actions/upload-artifact@v4
