@@ -63,9 +63,18 @@ jobs:
         shell: bash
         run: |
           cd core/dist
-          # -y preserves the symlinks llama.cpp ships; dereferencing them triples the
-          # size of the largest library for nothing.
-          zip -ry "../../natives-${{ matrix.platform }}.zip" "${{ matrix.platform }}"
+          out="../../natives-${{ matrix.platform }}.zip"
+          if command -v zip >/dev/null; then
+            # -y preserves the symlinks llama.cpp ships on Unix; dereferencing them
+            # triples the size of the largest library for nothing.
+            zip -ry "$out" "${{ matrix.platform }}"
+          else
+            # Windows runners have no zip. tar there is bsdtar, which writes zip when
+            # -a infers the format from the extension. No symlinks to preserve on
+            # Windows anyway -- the build emits plain DLLs.
+            tar -a -cf "$out" "${{ matrix.platform }}"
+          fi
+          ls -l "$out"
 
       - uses: actions/upload-artifact@v4
         with:
