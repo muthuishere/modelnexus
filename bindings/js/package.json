@@ -19,5 +19,11 @@
   "dependencies": {
     "koffi": "^2.9.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "optionalDependencies": {
+    "@muthuishere/modelnexus-darwin-aarch64": "0.1.0",
+    "@muthuishere/modelnexus-darwin-x86_64": "0.1.0",
+    "@muthuishere/modelnexus-linux-x86_64": "0.1.0",
+    "@muthuishere/modelnexus-windows-x86_64": "0.1.0"
+  }
 }

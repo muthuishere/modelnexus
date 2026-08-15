@@ -7,6 +7,7 @@ import koffi from 'koffi';
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { arch, platform } from 'node:process';
 
 /** The native bridge could not be located or loaded. */
@@ -48,7 +49,23 @@ function candidates() {
   }
 
   const here = dirname(fileURLToPath(import.meta.url));
+  // Natives bundled inside this package (used when someone vendors them locally).
   out.push(join(here, 'native', platformKey(), name));
+
+  // The published layout: a SEPARATE per-platform package, pulled in through
+  // optionalDependencies so npm installs only the one that matches (ADR-0007).
+  // Resolved rather than path-joined, because the package may be hoisted to a
+  // parent node_modules or live in a pnpm store, and guessing the path gets that
+  // wrong in exactly the setups people actually use.
+  try {
+    const req = createRequire(import.meta.url);
+    const pkg = `@muthuishere/modelnexus-${platformKey()}`;
+    const entry = req.resolve(`${pkg}/package.json`);
+    out.push(join(dirname(entry), 'native', platformKey(), name));
+  } catch {
+    // Not installed for this platform -- fall through to the remaining candidates
+    // and let the caller see the full list of what was searched.
+  }
 
   // Walk up to the repo's own build output, for working in the tree.
   let dir = here;

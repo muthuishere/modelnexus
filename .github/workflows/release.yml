@@ -172,7 +172,13 @@ jobs:
               windows-x86_64) os=win32;  cpu=x64 ;;
             esac
             pkg="pkg-$plat"; mkdir -p "$pkg/native/$plat"
-            cp -a "$src"/. "$pkg/native/$plat/"
+            # -L, NOT -a: npm pack silently DROPS symlinks. llama.cpp ships its
+            # versioned aliases as symlinks, and the bridge links the versioned names
+            # (@rpath/libllama.0.dylib), so a symlink-preserving copy produces a
+            # package that installs cleanly and fails at first use. Verified: 29 files
+            # became 11 and both linked libraries went missing. Dereferencing costs
+            # size, but only one platform package installs per machine.
+            cp -RL "$src"/. "$pkg/native/$plat/"
             cat > "$pkg/package.json" <<JSON
           {
             "name": "@muthuishere/modelnexus-$plat",
