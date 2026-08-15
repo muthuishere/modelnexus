@@ -14,4 +14,5 @@ alternatives — six months from now that section is the whole value of the docu
 | [0002](0002-the-c-abi-is-the-product.md) | The C ABI is the product; bindings are thin | accepted |
 | [0003](0003-modelnexus-and-toolnexus-do-not-depend-on-each-other.md) | modelnexus and toolnexus do not depend on each other | accepted |
 | [0004](0004-two-tier-native-release.md) | Two-tier native release; nothing published from a laptop | accepted |
-| [0005](0005-mochallama-becomes-a-consumer.md) | mochallama becomes a consumer of the core, not its owner | accepted |
+| [0005](0005-mochallama-becomes-a-consumer.md) | mochallama becomes a consumer of the core, not its owner | accepted (Java clause superseded by 0006) |
+| [0006](0006-no-java-binding.md) | modelnexus ships no Java binding | accepted |

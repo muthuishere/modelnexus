@@ -32,6 +32,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -61,6 +62,14 @@ static const char LLB_VERSION_STR[] =
 /* Opaque handle definition                                            */
 /* ------------------------------------------------------------------ */
 
+/* One loaded LoRA adapter and the scale it is currently applied at. */
+struct llb_lora_slot {
+    int                        id      = -1;
+    std::string                path;
+    float                      scale   = 1.0f;
+    struct llama_adapter_lora* adapter = nullptr;
+};
+
 struct llb_chat {
     std::string                model_path;
     llb_event_cb               event_cb  = nullptr;
@@ -69,6 +78,25 @@ struct llb_chat {
     struct llama_model*        model     = nullptr;
     struct llama_context*      ctx       = nullptr;
     common_chat_templates_ptr  templates;   // owns the parsed chat template(s)
+    std::vector<llb_lora_slot> loras;       // active adapters, in application order
+    int                        next_lora_id = 0;
+};
+
+/* Embedding / reranking engine.
+
+   Separate from llb_chat because embeddings require a context built with
+   embeddings enabled and a pooling type chosen up front; reranking further
+   requires LLAMA_POOLING_TYPE_RANK, which is what attaches the model's
+   classification head to the graph. None of that can be switched on a
+   generation context after creation. */
+struct llb_embed {
+    std::string             model_path;
+    llb_event_cb            event_cb  = nullptr;
+    void*                   user_data = nullptr;
+    struct llama_model*     model     = nullptr;
+    struct llama_context*   ctx       = nullptr;
+    enum llama_pooling_type pooling   = LLAMA_POOLING_TYPE_UNSPECIFIED;
+    int                     n_batch   = 512;
 };
 
 /* ------------------------------------------------------------------ */
@@ -682,6 +710,433 @@ extern "C" const char* llb_chat_infer(llb_chat_t* chat, const char* request_json
 extern "C" const char* llb_chat_infer_stream(llb_chat_t* chat, const char* request_json,
                                              llb_token_cb token_cb, void* user_data) {
     return infer_impl(chat, request_json, token_cb, user_data);
+}
+
+/* ================================================================== */
+/* LoRA adapters                                                       */
+/* ================================================================== */
+
+/* Push the current slot set onto the context.
+
+   llama_set_adapters_lora replaces the whole set rather than adding to it, so
+   every mutation rebuilds the arrays and reapplies. That is also why removing an
+   adapter cannot simply "unset" one -- there is no such operation. */
+static int apply_loras(llb_chat_t* chat) {
+    std::vector<struct llama_adapter_lora*> adapters;
+    std::vector<float>                      scales;
+    adapters.reserve(chat->loras.size());
+    scales.reserve(chat->loras.size());
+    for (const auto& slot : chat->loras) {
+        adapters.push_back(slot.adapter);
+        scales.push_back(slot.scale);
+    }
+    return llama_set_adapters_lora(chat->ctx,
+                                   adapters.empty() ? nullptr : adapters.data(),
+                                   adapters.size(),
+                                   scales.empty() ? nullptr : scales.data());
+}
+
+/* The adapter set, always returned in full after any operation, so a caller
+   never has to model state the core already holds. */
+static json lora_state(const llb_chat_t* chat) {
+    json arr = json::array();
+    for (const auto& slot : chat->loras) {
+        arr.push_back({ {"id", slot.id}, {"path", slot.path}, {"scale", slot.scale} });
+    }
+    return arr;
+}
+
+extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json) {
+    if (!chat)         return build_error("ENGINE_NULL", "chat handle is null");
+    if (!chat->ctx)    return build_error("ENGINE_CLOSED", "engine has no context");
+    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+
+    json req;
+    try {
+        req = json::parse(request_json);
+    } catch (const std::exception& e) {
+        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + e.what());
+    }
+
+    const std::string op = req.value("op", "");
+    if (op.empty()) {
+        return build_error("BAD_REQUEST", "missing \"op\" (load|set|remove|clear|list)");
+    }
+
+    json out;
+    out["type"] = "lora";
+
+    if (op == "list") {
+        out["adapters"] = lora_state(chat);
+        return dup_cstr(out.dump());
+    }
+
+    if (op == "load") {
+        const std::string path = req.value("path", "");
+        if (path.empty()) return build_error("BAD_REQUEST", "\"load\" requires a \"path\"");
+
+        struct llama_adapter_lora* adapter = llama_adapter_lora_init(chat->model, path.c_str());
+        if (!adapter) {
+            return build_error("LORA_LOAD_FAILED", "could not load LoRA adapter: " + path);
+        }
+
+        llb_lora_slot slot;
+        slot.id      = chat->next_lora_id++;
+        slot.path    = path;
+        slot.scale   = req.value("scale", 1.0f);
+        slot.adapter = adapter;
+        chat->loras.push_back(slot);
+
+        if (apply_loras(chat) != 0) {
+            /* Roll back rather than leave the slot list describing a state the
+               context is not actually in. */
+            llama_adapter_lora_free(adapter);
+            chat->loras.pop_back();
+            apply_loras(chat);
+            return build_error("LORA_APPLY_FAILED", "adapter loaded but could not be applied: " + path);
+        }
+        emit(chat, "lora_loaded");
+        out["id"]       = slot.id;
+        out["adapters"] = lora_state(chat);
+        return dup_cstr(out.dump());
+    }
+
+    if (op == "set") {
+        if (!req.contains("id")) return build_error("BAD_REQUEST", "\"set\" requires an \"id\"");
+        const int   id    = req.value("id", -1);
+        const float scale = req.value("scale", 1.0f);
+        bool found = false;
+        for (auto& slot : chat->loras) {
+            if (slot.id == id) { slot.scale = scale; found = true; break; }
+        }
+        if (!found) return build_error("LORA_NOT_FOUND", "no adapter with id " + std::to_string(id));
+        if (apply_loras(chat) != 0) {
+            return build_error("LORA_APPLY_FAILED", "could not apply scale to adapter " + std::to_string(id));
+        }
+        out["id"]       = id;
+        out["adapters"] = lora_state(chat);
+        return dup_cstr(out.dump());
+    }
+
+    if (op == "remove") {
+        if (!req.contains("id")) return build_error("BAD_REQUEST", "\"remove\" requires an \"id\"");
+        const int id = req.value("id", -1);
+        bool found = false;
+        for (size_t i = 0; i < chat->loras.size(); ++i) {
+            if (chat->loras[i].id == id) {
+                llama_adapter_lora_free(chat->loras[i].adapter);
+                chat->loras.erase(chat->loras.begin() + (long)i);
+                found = true;
+                break;
+            }
+        }
+        if (!found) return build_error("LORA_NOT_FOUND", "no adapter with id " + std::to_string(id));
+        apply_loras(chat);
+        out["adapters"] = lora_state(chat);
+        return dup_cstr(out.dump());
+    }
+
+    if (op == "clear") {
+        for (auto& slot : chat->loras) llama_adapter_lora_free(slot.adapter);
+        chat->loras.clear();
+        apply_loras(chat);
+        out["adapters"] = lora_state(chat);
+        return dup_cstr(out.dump());
+    }
+
+    return build_error("BAD_REQUEST", "unknown op \"" + op + "\" (load|set|remove|clear|list)");
+}
+
+/* ================================================================== */
+/* Embeddings and reranking                                            */
+/* ================================================================== */
+
+static enum llama_pooling_type parse_pooling(const std::string& s) {
+    if (s == "none") return LLAMA_POOLING_TYPE_NONE;
+    if (s == "mean") return LLAMA_POOLING_TYPE_MEAN;
+    if (s == "cls")  return LLAMA_POOLING_TYPE_CLS;
+    if (s == "last") return LLAMA_POOLING_TYPE_LAST;
+    if (s == "rank") return LLAMA_POOLING_TYPE_RANK;
+    return LLAMA_POOLING_TYPE_UNSPECIFIED;
+}
+
+extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
+                                         const char* config_json,
+                                         llb_event_cb event_cb,
+                                         void* user_data) {
+    if (!gguf_path) {
+        emit_raw(event_cb, user_data, "create_failure:null_path");
+        return nullptr;
+    }
+    {
+        FILE* f = fopen(gguf_path, "rb");
+        if (!f) {
+            emit_raw(event_cb, user_data, "create_failure:model_not_found");
+            return nullptr;
+        }
+        fclose(f);
+    }
+
+    json cfg = json::object();
+    if (config_json && *config_json) {
+        try {
+            cfg = json::parse(config_json);
+        } catch (const std::exception&) {
+            emit_raw(event_cb, user_data, "create_failure:bad_config");
+            return nullptr;
+        }
+    }
+
+    /* `struct` tag required: the function llb_embed() shadows the struct name here. */
+    llb_embed_t* e = new (std::nothrow) struct llb_embed();
+    if (!e) {
+        emit_raw(event_cb, user_data, "create_failure:oom");
+        return nullptr;
+    }
+    e->model_path = gguf_path;
+    e->event_cb   = event_cb;
+    e->user_data  = user_data;
+    e->pooling    = parse_pooling(cfg.value("pooling", std::string()));
+
+    emit_raw(event_cb, user_data, "create_start");
+
+    llama_backend_init();
+
+    llama_model_params mparams = llama_model_default_params();
+    mparams.n_gpu_layers = 0;
+
+    e->model = llama_model_load_from_file(gguf_path, mparams);
+    if (!e->model) {
+        emit_raw(event_cb, user_data, "create_failure:load_model");
+        delete e;
+        return nullptr;
+    }
+
+    llama_context_params cparams = llama_context_default_params();
+    const int n_ctx = cfg.value("n_ctx", 0);
+    e->n_batch      = cfg.value("n_batch", 512);
+    if (n_ctx > 0) cparams.n_ctx = (uint32_t)n_ctx;
+    cparams.n_batch      = (uint32_t)e->n_batch;
+    /* An embedding context must also be told its batch can hold a whole sequence
+       at once: unlike generation there is no incremental decode to fall back on. */
+    cparams.n_ubatch     = (uint32_t)e->n_batch;
+    cparams.embeddings   = true;
+    cparams.pooling_type = e->pooling;
+
+    e->ctx = llama_init_from_model(e->model, cparams);
+    if (!e->ctx) {
+        emit_raw(event_cb, user_data, "create_failure:init_context");
+        llama_model_free(e->model);
+        delete e;
+        return nullptr;
+    }
+    llama_set_embeddings(e->ctx, true);
+    /* Record what the context actually chose -- an UNSPECIFIED request resolves to
+       the model's own default, and llb_rerank has to check the real value. */
+    e->pooling = llama_pooling_type(e->ctx);
+
+    emit_raw(event_cb, user_data, "create_success");
+    return e;
+}
+
+/* Decode one token sequence and copy out its pooled embedding.
+
+   One sequence per decode: slower than packing many into a batch, but it keeps
+   sequence-to-result mapping trivially correct, which matters more while this is
+   the first version of the capability. Batching is a later optimisation. */
+static bool embed_tokens(llb_embed_t* e,
+                         const std::vector<llama_token>& tokens,
+                         int n_out,
+                         std::vector<float>& out,
+                         std::string& err) {
+    if (tokens.empty()) { err = "empty token sequence"; return false; }
+    if ((int)tokens.size() > e->n_batch) {
+        err = "input of " + std::to_string(tokens.size()) +
+              " tokens exceeds n_batch " + std::to_string(e->n_batch);
+        return false;
+    }
+
+    llama_memory_clear(llama_get_memory(e->ctx), true);
+
+    llama_batch batch = llama_batch_init((int32_t)tokens.size(), 0, 1);
+    common_batch_clear(batch);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        /* logits=true on every token: pooling reads all of them, and CLS/LAST
+           pooling would otherwise silently read a position that was never
+           computed. */
+        common_batch_add(batch, tokens[i], (llama_pos)i, { 0 }, true);
+    }
+
+    const int rc = llama_decode(e->ctx, batch);
+    llama_batch_free(batch);
+    if (rc != 0) {
+        err = "llama_decode failed with code " + std::to_string(rc);
+        return false;
+    }
+
+    const float* emb = llama_get_embeddings_seq(e->ctx, 0);
+    if (!emb) {
+        err = "no pooled embedding was produced (pooling type may be \"none\")";
+        return false;
+    }
+    out.assign(emb, emb + n_out);
+    return true;
+}
+
+extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
+    if (!e)            return build_error("ENGINE_NULL", "embed handle is null");
+    if (!e->ctx)       return build_error("ENGINE_CLOSED", "engine has no context");
+    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+
+    json req;
+    try {
+        req = json::parse(request_json);
+    } catch (const std::exception& ex) {
+        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + ex.what());
+    }
+
+    std::vector<std::string> inputs;
+    if (req.contains("input")) {
+        const json& in = req["input"];
+        if (in.is_string())      inputs.push_back(in.get<std::string>());
+        else if (in.is_array())  for (const auto& v : in) if (v.is_string()) inputs.push_back(v.get<std::string>());
+    }
+    if (inputs.empty()) {
+        return build_error("BAD_REQUEST", "\"input\" must be a string or a non-empty array of strings");
+    }
+
+    if (e->pooling == LLAMA_POOLING_TYPE_NONE) {
+        return build_error("POOLING_NONE",
+            "this engine was created with pooling \"none\", so there is no per-input "
+            "embedding to return; create it with \"mean\", \"cls\" or \"last\"");
+    }
+
+    const bool normalize = req.value("normalize", true);
+    const int  n_embd    = llama_model_n_embd(e->model);
+
+    json vectors = json::array();
+    int  total_tokens = 0;
+
+    for (const auto& text : inputs) {
+        std::vector<llama_token> tokens = common_tokenize(e->ctx, text, true, true);
+        total_tokens += (int)tokens.size();
+
+        std::vector<float> vec;
+        std::string err;
+        if (!embed_tokens(e, tokens, n_embd, vec, err)) {
+            return build_error("EMBED_FAILED", err);
+        }
+        if (normalize) {
+            std::vector<float> normed(vec.size());
+            common_embd_normalize(vec.data(), normed.data(), (int)vec.size(), 2);
+            vec.swap(normed);
+        }
+        vectors.push_back(vec);
+    }
+
+    json out;
+    out["type"]       = "embedding";
+    out["dim"]        = n_embd;
+    out["embeddings"] = vectors;
+    out["usage"]      = { {"prompt_tokens", total_tokens}, {"total_tokens", total_tokens} };
+    return dup_cstr(out.dump());
+}
+
+extern "C" const char* llb_rerank(llb_embed_t* e, const char* request_json) {
+    if (!e)            return build_error("ENGINE_NULL", "embed handle is null");
+    if (!e->ctx)       return build_error("ENGINE_CLOSED", "engine has no context");
+    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+
+    if (e->pooling != LLAMA_POOLING_TYPE_RANK) {
+        /* Refuse rather than return numbers that look like scores and are not:
+           without RANK pooling the classification head is not in the graph at all. */
+        return build_error("POOLING_NOT_RANK",
+            "reranking requires a reranker model loaded with \"pooling\":\"rank\"");
+    }
+
+    json req;
+    try {
+        req = json::parse(request_json);
+    } catch (const std::exception& ex) {
+        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + ex.what());
+    }
+
+    const std::string query = req.value("query", "");
+    if (query.empty()) return build_error("BAD_REQUEST", "\"query\" is required");
+
+    std::vector<std::string> docs;
+    if (req.contains("documents") && req["documents"].is_array()) {
+        for (const auto& v : req["documents"]) if (v.is_string()) docs.push_back(v.get<std::string>());
+    }
+    if (docs.empty()) return build_error("BAD_REQUEST", "\"documents\" must be a non-empty array of strings");
+
+    const struct llama_vocab* vocab = llama_model_get_vocab(e->model);
+    const llama_token bos = llama_vocab_bos(vocab);
+    const llama_token eos = llama_vocab_eos(vocab);
+    const llama_token sep = llama_vocab_sep(vocab);
+
+    const std::vector<llama_token> q_tokens = common_tokenize(e->ctx, query, false, true);
+
+    struct scored { int index; float score; };
+    std::vector<scored> results;
+    int total_tokens = 0;
+
+    for (size_t i = 0; i < docs.size(); ++i) {
+        /* A reranker scores a PAIR, encoded as one sequence:
+           [BOS] query [EOS] [SEP] document [EOS]
+           This is the layout llama.cpp's own reranking path uses; feeding the two
+           texts separately produces a number, just not a meaningful one. */
+        std::vector<llama_token> d_tokens = common_tokenize(e->ctx, docs[i], false, true);
+        std::vector<llama_token> pair;
+        pair.reserve(q_tokens.size() + d_tokens.size() + 4);
+        if (bos != LLAMA_TOKEN_NULL) pair.push_back(bos);
+        pair.insert(pair.end(), q_tokens.begin(), q_tokens.end());
+        if (eos != LLAMA_TOKEN_NULL) pair.push_back(eos);
+        if (sep != LLAMA_TOKEN_NULL) pair.push_back(sep);
+        pair.insert(pair.end(), d_tokens.begin(), d_tokens.end());
+        if (eos != LLAMA_TOKEN_NULL) pair.push_back(eos);
+
+        total_tokens += (int)pair.size();
+
+        std::vector<float> score;
+        std::string err;
+        /* Under RANK pooling the sequence embedding is the classifier output --
+           n_cls_out floats, normally one. */
+        const int n_cls = (int)llama_model_n_cls_out(e->model);
+        if (!embed_tokens(e, pair, n_cls > 0 ? n_cls : 1, score, err)) {
+            return build_error("RERANK_FAILED", err);
+        }
+        results.push_back({ (int)i, score.empty() ? 0.0f : score[0] });
+    }
+
+    std::sort(results.begin(), results.end(),
+              [](const scored& a, const scored& b) { return a.score > b.score; });
+
+    size_t keep = results.size();
+    if (req.contains("top_n")) {
+        const int n = req.value("top_n", (int)results.size());
+        if (n >= 0 && (size_t)n < keep) keep = (size_t)n;
+    }
+
+    json arr = json::array();
+    for (size_t i = 0; i < keep; ++i) {
+        /* The ORIGINAL index travels with the score: results are reordered, and a
+           caller has to be able to map back to its own list. */
+        arr.push_back({ {"index", results[i].index}, {"score", results[i].score} });
+    }
+
+    json out;
+    out["type"]    = "rerank";
+    out["results"] = arr;
+    out["usage"]   = { {"prompt_tokens", total_tokens}, {"total_tokens", total_tokens} };
+    return dup_cstr(out.dump());
+}
+
+extern "C" void llb_embed_destroy(llb_embed_t* e) {
+    if (!e) return;
+    if (e->ctx)   llama_free(e->ctx);
+    if (e->model) llama_model_free(e->model);
+    delete e;
 }
 
 extern "C" void llb_string_free(const char* s) {

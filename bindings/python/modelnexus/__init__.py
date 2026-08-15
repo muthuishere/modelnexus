@@ -19,6 +19,7 @@ from ._lib import EVENT_CB, TOKEN_CB, NativeLibraryNotFound, load, platform_key,
 
 __all__ = [
     "Chat",
+    "Embedder",
     "ModelError",
     "ToolsUnsupportedError",
     "NativeLibraryNotFound",
@@ -164,6 +165,44 @@ class Chat:
             raise ModelError(err.get("code", "UNKNOWN"), err.get("message", ""))
         return response
 
+    # -- LoRA adapters -----------------------------------------------------
+
+    def _lora(self, **op: Any) -> dict[str, Any]:
+        self._check_open()
+        ptr = self._lib.llb_chat_lora(
+            ctypes.c_void_p(self._handle), json.dumps(op).encode("utf-8")
+        )
+        result = json.loads(take_string(self._lib, ptr) or "{}")
+        if result.get("type") == "error":
+            err = result.get("error") or {}
+            raise ModelError(err.get("code", "UNKNOWN"), err.get("message", ""))
+        return result
+
+    def load_lora(self, path: str, scale: float = 1.0) -> int:
+        """Load a LoRA adapter and apply it. Returns its id.
+
+        Several adapters can be active at once; they are applied in load order.
+        Adapters change *behaviour* -- format, tone, tool-call reliability -- not
+        knowledge. For facts, retrieve.
+        """
+        return int(self._lora(op="load", path=str(path), scale=scale)["id"])
+
+    def set_lora_scale(self, adapter_id: int, scale: float) -> None:
+        """Change an adapter's scale. Takes effect on the next inference."""
+        self._lora(op="set", id=adapter_id, scale=scale)
+
+    def remove_lora(self, adapter_id: int) -> None:
+        """Unload one adapter and reapply the rest."""
+        self._lora(op="remove", id=adapter_id)
+
+    def clear_loras(self) -> None:
+        """Unload every adapter, returning the model to its base behaviour."""
+        self._lora(op="clear")
+
+    def loras(self) -> list[dict[str, Any]]:
+        """The adapters currently applied, in order: id, path and scale."""
+        return list(self._lora(op="list").get("adapters", []))
+
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
@@ -177,6 +216,128 @@ class Chat:
             raise ModelError("ENGINE_CLOSED", "this Chat has already been closed")
 
     def __enter__(self) -> "Chat":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best-effort safety net
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class Embedder:
+    """A model loaded for embedding or reranking.
+
+    Separate from :class:`Chat` because embedding needs a context built with
+    embeddings enabled and a pooling strategy fixed at creation -- and reranking
+    needs ``pooling="rank"`` specifically, which is what puts the model's
+    classification head in the graph. Neither can be switched afterwards.
+
+        with Embedder("bge-small.gguf", pooling="mean") as emb:
+            vectors = emb.embed(["hello", "world"])
+
+        with Embedder("bge-reranker.gguf", pooling="rank") as rr:
+            for hit in rr.rerank("capital of France?", docs):
+                print(hit["index"], hit["score"])
+    """
+
+    def __init__(
+        self,
+        gguf_path: str,
+        *,
+        pooling: str | None = None,
+        n_ctx: int = 0,
+        n_batch: int = 512,
+        on_event: Callable[[str], None] | None = None,
+    ) -> None:
+        self._lib = load()
+        self._handle: int | None = None
+        self._events: list[str] = []
+
+        def _on_event(event: bytes, _user: Any) -> None:
+            text = event.decode("utf-8", "replace") if event else ""
+            self._events.append(text)
+            if on_event is not None:
+                on_event(text)
+
+        # Held on the instance for the same reason as Chat's: the core keeps the
+        # pointer for the life of the handle.
+        self._event_cb = EVENT_CB(_on_event)
+
+        config: dict[str, Any] = {"n_batch": n_batch}
+        if pooling is not None:
+            config["pooling"] = pooling
+        if n_ctx:
+            config["n_ctx"] = n_ctx
+
+        handle = self._lib.llb_embed_create(
+            str(gguf_path).encode("utf-8"),
+            json.dumps(config).encode("utf-8"),
+            self._event_cb,
+            None,
+        )
+        if not handle:
+            detail = "; ".join(self._events) or "unknown reason"
+            raise ModelError("MODEL_LOAD_FAILED", f"could not load {gguf_path} ({detail})")
+        self._handle = handle
+
+    def _call(self, fn: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+        if not self._handle:
+            raise ModelError("ENGINE_CLOSED", "this Embedder has already been closed")
+        ptr = fn(ctypes.c_void_p(self._handle), json.dumps(request).encode("utf-8"))
+        result = json.loads(take_string(self._lib, ptr) or "{}")
+        if result.get("type") == "error":
+            err = result.get("error") or {}
+            raise ModelError(err.get("code", "UNKNOWN"), err.get("message", ""))
+        return result
+
+    def embed(
+        self,
+        texts: str | Sequence[str],
+        *,
+        normalize: bool = True,
+    ) -> list[list[float]]:
+        """Embed one string or many. Returns one vector per input, in input order.
+
+        Normalized to unit length by default, which is what makes a dot product a
+        cosine similarity.
+        """
+        inputs = [texts] if isinstance(texts, str) else list(texts)
+        result = self._call(
+            self._lib.llb_embed, {"input": inputs, "normalize": normalize}
+        )
+        return result.get("embeddings", [])
+
+    def rerank(
+        self,
+        query: str,
+        documents: Sequence[str],
+        *,
+        top_n: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Score documents against a query, best first.
+
+        Each result carries the document's ORIGINAL index, because the list comes
+        back reordered. Scores are raw model logits: comparable within one call,
+        not across models, and not probabilities.
+
+        Requires a reranker model loaded with ``pooling="rank"``.
+        """
+        request: dict[str, Any] = {"query": query, "documents": list(documents)}
+        if top_n is not None:
+            request["top_n"] = top_n
+        return self._call(self._lib.llb_rerank, request).get("results", [])
+
+    def close(self) -> None:
+        """Release the model and its context. Idempotent."""
+        if self._handle:
+            self._lib.llb_embed_destroy(ctypes.c_void_p(self._handle))
+            self._handle = None
+
+    def __enter__(self) -> "Embedder":
         return self
 
     def __exit__(self, *_exc: object) -> None:

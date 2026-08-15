@@ -20,6 +20,8 @@ vars:
   DIST: core/dist/{{.PLATFORM}}
   # A small tool-capable GGUF used by the smoke tests. Override to test another.
   MODEL: '{{.MODEL | default "~/.chatbot_models/qwen2.5-1.5b-instruct-q4_k_m.gguf"}}'
+  # A reranker GGUF (needs "rank" pooling). Rerank tests skip without it.
+  RERANKER: '{{.RERANKER | default "~/.chatbot_models/bge-reranker-v2-m3-Q4_K_M.gguf"}}'
 
 tasks:
   default:
@@ -109,6 +111,8 @@ tasks:
       - task: build
       - task: test:python
       - task: test:go
+      - task: test:csharp
+      - task: test:js
 
   test:python:
     desc: Python binding (ctypes) smoke test
@@ -116,6 +120,7 @@ tasks:
     cmds: ['python3 -m pytest -q tests/']
     env:
       MODELNEXUS_MODEL: '{{.MODEL}}'
+      MODELNEXUS_RERANKER: '{{.RERANKER}}'
 
   test:go:
     desc: Go binding (purego, CGO_ENABLED=0) tests
@@ -123,7 +128,24 @@ tasks:
     env:
       CGO_ENABLED: '0'
       MODELNEXUS_MODEL: '{{.MODEL}}'
-    cmds: ['go test ./... -v']
+      MODELNEXUS_RERANKER: '{{.RERANKER}}'
+    cmds: ['go vet ./...', 'go test ./...']
+
+  test:csharp:
+    desc: C# binding (P/Invoke) smoke run
+    dir: bindings/csharp/Smoke
+    env:
+      MODELNEXUS_MODEL: '{{.MODEL}}'
+      MODELNEXUS_RERANKER: '{{.RERANKER}}'
+    cmds: ['dotnet run -v q --nologo']
+
+  test:js:
+    desc: JS binding (koffi) tests
+    dir: bindings/js
+    env:
+      MODELNEXUS_MODEL: '{{.MODEL}}'
+      MODELNEXUS_RERANKER: '{{.RERANKER}}'
+    cmds: ['npm install --silent', 'npm test --silent']
 
   # ---------------------------------------------------------------- publishing
 

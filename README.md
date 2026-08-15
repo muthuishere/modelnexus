@@ -3,7 +3,7 @@
 **Local LLM inference as a C ABI, bound into five languages.** llama.cpp underneath,
 GGUF models, no daemon, no HTTP hop, no native-install dance.
 
-> Status: **pre-alpha, nothing published — but it runs.** The C core is extracted from
+> Status: **pre-alpha, nothing published — but it works.** The C core is extracted from
 > [mochallama](https://github.com/deemwar-products/mochallama), where it has been running in
 > production as `llamabridge` behind Java/Panama. Two bindings are working and tested against a
 > real model; three are not written yet. See `docs/adr/` for the decisions and
@@ -16,11 +16,27 @@ UTF-8 strings the caller frees — plus one thin binding per language:
 
 | language | mechanism | status |
 |---|---|---|
-| Python | `ctypes` | **working** — 7 tests green against a real GGUF |
-| Go | `purego`, no cgo | **working** — 7 tests green, `CGO_ENABLED=0`, `go vet` clean |
-| Java | Panama FFM (JDK 22+) | proven in mochallama; not yet moved here |
-| C# | P/Invoke | not written |
-| JS/TS | `koffi` / Node-API | not written |
+| Go | `purego`, no cgo | **working** — 13 tests, `CGO_ENABLED=0`, `go vet` clean |
+| Python | `ctypes` | **working** — 7 tests |
+| C# | P/Invoke | **working** — smoke run, net8.0 |
+| JS | `koffi` | **working** — 12 tests |
+
+No Java binding, deliberately ([ADR-0006](docs/adr/0006-no-java-binding.md)) — the JVM is
+served by [mochallama](https://github.com/deemwar-products/mochallama), which already ships a
+Panama binding plus the Spring integration a JVM developer actually wants.
+
+All four bindings run the same assertions and assert the **same error codes**. Verified
+against a real 1.5B model and a real reranker: identical output, down to rerank scores of
+`+6.591 / -5.161 / -11.004` in every language.
+
+## What it does
+
+| | |
+|---|---|
+| **chat** | generation, streaming, OpenAI-shaped tool calls, token usage |
+| **LoRA** | load / scale / remove / clear adapters at runtime, several at once |
+| **embeddings** | one vector per input, L2-normalized, choice of pooling |
+| **reranking** | query-document scoring with a reranker model |
 
 ```bash
 task build     # download llama.cpp's prebuilt libs, compile only our bridge (seconds)

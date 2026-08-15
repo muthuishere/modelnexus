@@ -112,6 +112,12 @@ var (
 	llbChatStream  func(chat uintptr, req string, tokenCB uintptr, userData uintptr) unsafe.Pointer
 	llbStringFree  func(s unsafe.Pointer)
 	llbChatDestroy func(chat uintptr)
+
+	llbChatLora     func(chat uintptr, req string) unsafe.Pointer
+	llbEmbedCreate  func(path string, config string, eventCB uintptr, userData uintptr) uintptr
+	llbEmbed        func(embed uintptr, req string) unsafe.Pointer
+	llbRerank       func(embed uintptr, req string) unsafe.Pointer
+	llbEmbedDestroy func(embed uintptr)
 )
 
 func ensureLoaded() error {
@@ -136,6 +142,11 @@ func ensureLoaded() error {
 			purego.RegisterLibFunc(&llbChatStream, handle, "llb_chat_infer_stream")
 			purego.RegisterLibFunc(&llbStringFree, handle, "llb_string_free")
 			purego.RegisterLibFunc(&llbChatDestroy, handle, "llb_chat_destroy")
+			purego.RegisterLibFunc(&llbChatLora, handle, "llb_chat_lora")
+			purego.RegisterLibFunc(&llbEmbedCreate, handle, "llb_embed_create")
+			purego.RegisterLibFunc(&llbEmbed, handle, "llb_embed")
+			purego.RegisterLibFunc(&llbRerank, handle, "llb_rerank")
+			purego.RegisterLibFunc(&llbEmbedDestroy, handle, "llb_embed_destroy")
 			return
 		}
 		loadErr = &ErrNativeLibraryNotFound{Searched: searched, Cause: lastErr}

@@ -173,6 +173,132 @@ void llb_string_free(const char* s);
  */
 void llb_chat_destroy(llb_chat_t* chat);
 
+/* ------------------------------------------------------------------ */
+/* LoRA adapters                                                       */
+/*                                                                     */
+/* One entry point for every adapter operation, dispatched on an "op"  */
+/* field in the request JSON. Adding an operation therefore does not   */
+/* change the ABI and does not churn five language bindings -- the     */
+/* same reason generation parameters travel inside the request rather  */
+/* than as C arguments.                                                */
+/*                                                                     */
+/* Adapters are loaded against the engine's model and applied to its   */
+/* context. Scales are per-adapter and may be changed at any time      */
+/* between inferences; several adapters can be active at once.         */
+/*                                                                     */
+/* Request shapes:                                                     */
+/*   {"op":"load",   "path":"adapter.gguf", "scale":1.0}               */
+/*   {"op":"set",    "id":0, "scale":0.5}                              */
+/*   {"op":"remove", "id":0}                                           */
+/*   {"op":"clear"}                                                    */
+/*   {"op":"list"}                                                     */
+/*                                                                     */
+/* Response (success) -- always the full adapter set after the op, so  */
+/* a caller never has to track state the core already knows:           */
+/*   {                                                                 */
+/*     "type": "lora",                                                 */
+/*     "id":   0,            // the affected adapter, for "load" only  */
+/*     "adapters": [ {"id":0,"path":"...","scale":1.0}, ... ]          */
+/*   }                                                                 */
+/*                                                                     */
+/* Failures come back as the same error JSON every other call uses.    */
+/* Never returns NULL. Release via llb_string_free.                    */
+/* ------------------------------------------------------------------ */
+
+const char* llb_chat_lora(llb_chat_t* chat, const char* request_json);
+
+/* ------------------------------------------------------------------ */
+/* Embeddings and reranking                                            */
+/*                                                                     */
+/* A SEPARATE handle from llb_chat, deliberately: embedding needs a    */
+/* context created with embeddings enabled and a pooling type fixed at */
+/* creation, and reranking needs LLAMA_POOLING_TYPE_RANK specifically. */
+/* Neither can be toggled on a generation context after the fact, so   */
+/* sharing one handle would mean silently reloading the model.         */
+/* ------------------------------------------------------------------ */
+
+typedef struct llb_embed llb_embed_t;
+
+/*
+ * Load a model for embedding or reranking.
+ *
+ * config_json (may be NULL or "" for defaults):
+ *   {
+ *     "pooling": "mean" | "cls" | "last" | "rank" | "none",
+ *     "n_ctx":   512,      // 0 = model default
+ *     "n_batch": 512
+ *   }
+ *
+ * Use "rank" for a reranker model -- llb_rerank REQUIRES it, because the
+ * classification head is only attached to the graph under that pooling
+ * type. Embedding models want "mean" or "cls"; when omitted the model's
+ * own default is used.
+ *
+ * Unlike llb_chat_create there is NO tool-calling gate here: an
+ * embedding model has no chat template and rejecting it would be absurd.
+ *
+ * Returns NULL on failure, with the reason delivered through event_cb
+ * ("create_failure:model_not_found", ":load_model", ":init_context").
+ */
+llb_embed_t* llb_embed_create(const char* gguf_path,
+                              const char* config_json,
+                              llb_event_cb event_cb,
+                              void* user_data);
+
+/*
+ * Embed one or more texts.
+ *
+ * Request:
+ *   {
+ *     "input":     ["text one", "text two"],   // or a single string
+ *     "normalize": true                        // default true (L2)
+ *   }
+ *
+ * Response:
+ *   {
+ *     "type":       "embedding",
+ *     "dim":        384,
+ *     "embeddings": [ [ ... ], [ ... ] ],       // one per input, input order
+ *     "usage":      { "prompt_tokens": N, "total_tokens": N }
+ *   }
+ *
+ * Never returns NULL; failures are error JSON. Release via llb_string_free.
+ */
+const char* llb_embed(llb_embed_t* embed, const char* request_json);
+
+/*
+ * Rerank documents against a query. Requires a reranker model loaded with
+ * "pooling":"rank" -- otherwise this returns error code POOLING_NOT_RANK
+ * rather than silently returning meaningless scores.
+ *
+ * Request:
+ *   {
+ *     "query":     "what is the capital of France?",
+ *     "documents": ["Paris is ...", "Berlin is ..."],
+ *     "top_n":     2          // optional; default all, sorted by score desc
+ *   }
+ *
+ * Response -- results are sorted by score descending and carry the ORIGINAL
+ * index, so a caller can map back to its own list after reordering:
+ *   {
+ *     "type": "rerank",
+ *     "results": [ {"index":0, "score":8.1}, {"index":1, "score":-4.2} ],
+ *     "usage": { "prompt_tokens": N, "total_tokens": N }
+ *   }
+ *
+ * Scores are raw model logits: comparable within one call, not calibrated
+ * across models, and not probabilities.
+ *
+ * Never returns NULL. Release via llb_string_free.
+ */
+const char* llb_rerank(llb_embed_t* embed, const char* request_json);
+
+/*
+ * Tear down an embedding engine and release its model + context.
+ * Safe to call on NULL.
+ */
+void llb_embed_destroy(llb_embed_t* embed);
+
 /*
  * Return a static, NUL-terminated version string identifying the
  * bridge build (bridge version + linked llama.cpp tag). The returned

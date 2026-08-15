@@ -140,6 +140,21 @@ def _bind_signatures(lib: ctypes.CDLL) -> None:
     ]
     lib.llb_chat_infer_stream.restype = ctypes.c_void_p
 
+    lib.llb_chat_lora.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.llb_chat_lora.restype = ctypes.c_void_p
+
+    lib.llb_embed_create.argtypes = [ctypes.c_char_p, ctypes.c_char_p, EVENT_CB, ctypes.c_void_p]
+    lib.llb_embed_create.restype = ctypes.c_void_p
+
+    lib.llb_embed.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.llb_embed.restype = ctypes.c_void_p
+
+    lib.llb_rerank.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.llb_rerank.restype = ctypes.c_void_p
+
+    lib.llb_embed_destroy.argtypes = [ctypes.c_void_p]
+    lib.llb_embed_destroy.restype = None
+
     lib.llb_string_free.argtypes = [ctypes.c_void_p]
     lib.llb_string_free.restype = None
 
