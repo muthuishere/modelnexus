@@ -1,0 +1,96 @@
+---
+title: Choosing a model
+description: Where GGUFs come from, what a quantisation label means, and the two loading rules that will reject your model.
+---
+
+Two hard rules before anything else:
+
+1. **A chat model must have a tool-capable chat template.** Without one the engine refuses
+   to load it. This is a policy, not a bug.
+2. **A reranker must be opened with `rank` pooling.** Without it `rerank` returns
+   `POOLING_NOT_RANK` rather than numbers.
+
+Everything else is taste.
+
+## Where GGUFs come from
+
+You download them. modelnexus ships **no model weights**, in any artifact, ever — not
+vendored, not cached in the repo, not published. The `natives-*` release archives contain
+compiled libraries and licence notices, nothing else.
+
+That means the licence for a model is **between you and its publisher**. Read it. Some
+permit commercial use, some do not, and a `.gguf` in a cache directory carries no reminder.
+
+The families used to test modelnexus, if you want a known-good starting point:
+
+| role | model used in the test suite |
+|---|---|
+| chat, tool-capable | `qwen2.5-1.5b-instruct-q4_k_m.gguf` |
+| chat, larger + LoRA base | `qwen2.5-3b-instruct-q4_k_m.gguf` |
+| reranking | `bge-reranker-v2-m3-Q4_K_M.gguf` |
+
+## Check before you load
+
+`llb_model_info` loads the model's metadata, computes its capabilities and frees it again —
+cheap enough to run before committing to a multi-gigabyte load.
+
+```python
+info = modelnexus.model_info("candidate.gguf")
+info["supports_tools"]         # False -> Chat() will refuse this file
+info["has_tool_use_template"]  # the GGUF ships a dedicated tool_use template
+info["chat_format"]            # CONTENT_ONLY, PEG_SIMPLE, PEG_NATIVE, ...
+```
+
+Skip it and you get a typed error at load — `MODEL_NOT_TOOL_CAPABLE` — rather than a model
+that quietly answers tool requests in prose. A model that degrades tool calls silently is
+worse than one that refuses to start.
+
+## Quantisation, in practice
+
+A GGUF filename ends with what was done to the weights. Decode it:
+
+| part | meaning |
+|---|---|
+| `Q4` | roughly four bits per weight, down from 16 |
+| `_K` | k-quant — the modern scheme; block-wise, better than the legacy `Q4_0` family at the same bit width |
+| `_S` / `_M` / `_L` | small / medium / large. How many tensors are kept at higher precision |
+| `F16`, `BF16` | not quantised. Full precision |
+
+Fewer bits means less memory and less weight movement per token — and a decode is dominated
+by weight movement, so a smaller quant is genuinely faster, not merely smaller.
+
+What it costs is precision, and it does not degrade politely. Aggressive quantisation shows
+up first in exactly the places you care about: instruction following, tool-argument
+correctness, and long-range consistency. The model does not get visibly stupider; it gets
+subtly less reliable, which is harder to notice and harder to debug.
+
+`Q4_K_M` is the default answer — it is what this project's own test suite runs. Go up when
+the model is making structural mistakes; go down only when memory forces it.
+
+**A bigger model at a smaller quant usually beats a smaller model at a bigger one.** Spend
+the bytes on parameters before you spend them on precision.
+
+## Sizing the context
+
+`n_ctx` is the KV cache, allocated at load and fixed for the life of the handle. It is
+memory you pay for whether you use it or not, so do not set 32768 because it sounds safe.
+
+There is **no eviction policy yet**. A conversation that outgrows `n_ctx` is not handled
+gracefully. Use `count_tokens` to see where you stand — it needs no decode and does not
+disturb the cache — and trim your own history before you hit the wall.
+
+## LoRA bases
+
+A LoRA adapter is a set of deltas onto specific tensors of a specific architecture. An
+adapter and its base are a **matched pair**: a Qwen2.5-3B adapter does not load against
+Qwen2.5-1.5B, and the filename will not warn you. Keep them together.
+
+## Embedding and reranking models
+
+Different job, different model, different handle. An embedder wants `mean` or `cls` pooling;
+a reranker needs `rank`, because that pooling type is what attaches the model's
+classification head to the graph. A chat model is not an embedding model, and asking one to
+be produces vectors that look fine and rank badly.
+
+Now the part most docs leave out.
+[What it is not →](/modelnexus/not/)

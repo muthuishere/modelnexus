@@ -1,0 +1,111 @@
+---
+title: The KV cache
+description: Conversations stop re-reading themselves. Flat cost per turn instead of quadratic — on by default.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+An agent loop appends. Turn twelve resends turns one through eleven. A runtime that clears
+its cache between calls re-reads all of it every time: cost per turn grows with the
+conversation, so cost per *conversation* is quadratic.
+
+modelnexus keeps what it already computed. Measured on a 1.5B model, `n_ctx=8192`, Metal,
+32 turns of a growing conversation:
+
+| turn | prompt | clear every turn | reuse | tokens reused | speed-up |
+|---|---|---|---|---|---|
+| 1 | 45 tok | 25.1 ms | 24.1 ms | 0 | 1.0× |
+| 8 | 374 tok | 54.7 ms | 25.1 ms | 327 | 2.2× |
+| 16 | 757 tok | 121.5 ms | 26.1 ms | 709 | 4.7× |
+| 24 | 1141 tok | 190.2 ms | 26.6 ms | 1093 | 7.2× |
+| 32 | 1525 tok | 247.2 ms | 27.3 ms | 1477 | **9.0×** |
+
+Total prefill over the 32 turns: **4198 ms → 829 ms**, and the gap was still widening when
+the run ended.
+
+**The ratio is not the point; the shape is.** The left column grows linearly. The right
+column does not move. Both numbers get better with a bigger model and a longer context, not
+worse.
+
+You do nothing to get this. It is the default.
+
+## The mechanism, in three sentences
+
+The engine holds the tokens of the previous call in its KV cache. On the next call it finds
+the longest common prefix between what is cached and the new prompt, drops everything after
+the divergence point, and decodes only the tail. An appending conversation diverges only at
+its end, so the tail is one turn — which is why the cost is flat.
+
+Under the hood: `llama_memory_seq_rm(mem, seq, n_common_prefix, -1)`, then a decode of the
+divergent tokens. No new llama.cpp capability was needed; the bridge simply used to clear
+the whole cache on every call.
+
+## Output is identical
+
+Reuse is a latency property. Same seed, same temperature, same text, same token counts.
+Every binding asserts it, against a cold run as the control:
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+cold := deterministic("Name the capital of France in one word.", 16)
+cold.ReuseCache = modelnexus.ReuseCacheOff()
+warm := deterministic("Name the capital of France in one word.", 16)
+
+a, _ := chat.Infer(cold)
+b, _ := chat.Infer(warm)
+// a.Text == b.Text, a.Usage.CompletionTokens == b.Usage.CompletionTokens
+```
+
+`ReuseCache` is a `*bool` so that nil means "the core decides". A plain `bool` would send
+`false` for every caller who never touched the field, and silently switch the cache off for
+all of them. `ReuseCacheOff()` and `ReuseCacheOn()` exist because a literal needs an
+address.
+</TabItem>
+<TabItem label="Python">
+```python
+params = dict(max_tokens=16, seed=42, temperature=0.0)
+cold = chat.infer(CAPITAL, reuse_cache=False, **params)
+warm = chat.infer(CAPITAL, reuse_cache=True, **params)
+assert warm["text"] == cold["text"]
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const cold = chat.infer({ ...ASK, reuseCache: false })
+const warm = chat.infer(ASK)
+assert.equal(warm.text, cold.text)
+```
+</TabItem>
+</Tabs>
+
+## Turning it off
+
+Set `reuse_cache: false` when a call must be **provably** independent of the ones before
+it — a determinism harness, or two tenants sharing one handle. You pay the full prefill
+every time. That is the trade you asked for.
+
+## Where it breaks: there is no eviction policy
+
+Every measurement above fits inside `n_ctx`. What should happen when a conversation
+outgrows the context window — reject, shift with `n_keep`, or evict — **is not decided and
+not implemented.**
+
+Until it is: at the window boundary reuse stops helping and behaviour falls back to the old
+path. Nothing corrupts, nothing is silently wrong. You lose the flat line, which is the
+whole feature, on exactly the long sessions that needed it most.
+
+Two mitigations today, both yours to apply:
+
+- Size the window at open time: `WithContextSize(n)` / `n_ctx=` / `{ nCtx: n }`. Fixed at
+  creation — it is the size of the KV cache and cannot change on a live engine.
+- [Count the prompt](/modelnexus/counting/) against `n_ctx` before you send it, and trim or
+  summarise your own history when it approaches the limit.
+
+Related and also not done: **no slots, no continuous batching.** One handle is one
+conversation. Four concurrent conversations in one context were measured — 642 ms serial
+against 305 ms batched into a single decode, **2.1×** — and both work, but neither is
+exposed. They are additive later and need no ABI break, which is why `n_seq_max` already
+exists as a create-time option that does nothing yet.
+
+[Counting tokens →](/modelnexus/counting/)

@@ -1,0 +1,182 @@
+---
+title: Streaming and cancellation
+description: Tokens as they are decoded, and how to stop — a cancelled generation is a result, not an exception.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Pass a callback and it is invoked once per decoded piece. The complete response is still
+returned when generation ends.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+resp, err := chat.InferStream(req, func(piece string) bool {
+	fmt.Print(piece)
+	return true          // keep going
+})
+fmt.Println(resp.Usage.CompletionTokens)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+r = chat.infer(messages, max_tokens=300, on_token=lambda p: print(p, end="", flush=True))
+print(r["usage"]["completion_tokens"])
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const r = chat.infer(request, (piece) => process.stdout.write(piece))
+console.log(r.usage.completion_tokens)
+```
+</TabItem>
+</Tabs>
+
+The streamed pieces concatenate to exactly `resp.Text`. That is asserted in the suites, not
+assumed.
+
+## Nothing means continue. Only false stops.
+
+| callback returns | effect |
+|---|---|
+| `true` | continue |
+| nothing — `None` / `undefined` / no `return` | **continue** |
+| `false` | stop, before the next token is decoded |
+
+This rule exists because the obvious callback — one that prints a piece and returns nothing
+— yields a falsy value. A binding that tested truthiness would cancel every stream after
+its first token. Every binding has a test named for that trap.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+seen := 0
+resp, _ := chat.InferStream(req, func(string) bool {
+	seen++
+	return seen < 8      // stop once the eighth piece has been delivered
+})
+// resp.Cancelled() == true, seen == 8, resp.Usage.CompletionTokens == 8
+```
+</TabItem>
+<TabItem label="Python">
+```python
+pieces = []
+
+def stop_after_eight(piece):
+    pieces.append(piece)
+    return False if len(pieces) >= 8 else None   # None keeps going
+
+r = chat.infer(messages, max_tokens=300, on_token=stop_after_eight)
+# r["finish_reason"] == "cancelled", len(pieces) == 8
+# r["usage"]["completion_tokens"] == 8
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+let seen = 0
+const r = chat.infer(request, () => {
+  seen++
+  return seen >= 8 ? false : undefined
+})
+// r.finish_reason === 'cancelled', seen === 8, r.usage.completion_tokens === 8
+```
+</TabItem>
+</Tabs>
+
+## A cancelled generation is a result
+
+It does not raise. It does not return an error. You get a complete response object
+carrying the text produced so far, honest usage counts, and `finish_reason: "cancelled"`.
+
+Those tokens were really generated and you really paid for the compute. Throwing them away
+to return an error would discard the only thing the call produced.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+if resp.Cancelled() {           // FinishReason == modelnexus.FinishCancelled
+	log.Printf("stopped after %d tokens: %q", resp.Usage.CompletionTokens, resp.Text)
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+if r["finish_reason"] == "cancelled":
+    print(f'stopped after {r["usage"]["completion_tokens"]} tokens: {r["text"]!r}')
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+if (r.finish_reason === 'cancelled') {
+  console.log(`stopped after ${r.usage.completion_tokens} tokens:`, r.text)
+}
+```
+</TabItem>
+</Tabs>
+
+The KV cache is rolled back to the prompt boundary when you stop. Without that, the
+abandoned half-finished turn would sit in the cache and a later request would happily match
+it as a reusable prefix — no error, plausible output, wrong answer. Stopping and
+[cache reuse](/modelnexus/cache/) shipped together for this reason.
+
+## Native cancellation
+
+Go and C# also honour their language's own cancellation primitive, wired to the same ABI
+mechanism — no extra behaviour, just the native shape.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+
+resp, err := chat.InferContext(ctx, req)          // no callback needed
+// resp.Cancelled() == true on timeout, err == nil
+
+// Streaming plus a context: either one ends the run.
+resp, err = chat.InferStreamContext(ctx, req, onToken)
+```
+
+`ctx` is checked once per decoded token, so cancellation takes effect before the **next**
+token, not mid-token. A context already cancelled when `InferContext` is called returns
+`context.Canceled` — nothing was generated, so there is no result to hand back, and that
+one really is an error.
+</TabItem>
+<TabItem label="Python">
+```python
+# Python has no cancellation primitive in the standard library, so there is nothing
+# to wire. Return False from on_token, or raise.
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+// JavaScript has no cancellation primitive here to wire — infer() is synchronous.
+// Return false from the callback.
+```
+</TabItem>
+</Tabs>
+
+C#, which is tested but not published, uses a signalled `CancellationToken`.
+
+## Never let an exception escape into the core
+
+The callback is invoked from C++ with its own unwinding. A managed or interpreted
+exception crossing that frame is undefined behaviour. The cancellation return value is
+exactly the mechanism for handling this: catch, stop, re-raise after the native call
+returns.
+
+Python does this for you:
+
+```python
+def blow_up(piece):
+    raise ValueError("consumer went away")
+
+chat.infer(messages, max_tokens=300, on_token=blow_up)
+# ValueError propagates here — after generation stopped on the FIRST piece,
+# not after running to max_tokens with the exception swallowed inside the C frame.
+```
+
+In Go and JavaScript the callback must not panic or throw. Catch it yourself and return
+`false`.
+
+[The KV cache →](/modelnexus/cache/)

@@ -1,0 +1,127 @@
+---
+title: JavaScript
+description: Every export of @muthuishere/modelnexus — Chat, Embedder, errors and log control.
+---
+
+```bash
+npm install @muthuishere/modelnexus
+```
+
+```js
+import { Chat, Embedder } from '@muthuishere/modelnexus'
+```
+
+ESM, Node. koffi rather than node-gyp/N-API, for the same reason Go uses purego: no compiler
+on the user's machine and no rebuild per Node version. The native library arrives as an
+`optionalDependencies` platform package — npm installs the one that matches and skips the
+rest without error.
+
+The API is **synchronous**. `infer` blocks the event loop for the duration of generation.
+
+## Module exports
+
+| export | purpose |
+|---|---|
+| `version()` | bridge version and the linked llama.cpp tag |
+| `modelInfo(ggufPath)` | tool-calling capability without loading an engine |
+| `platformKey()` | `darwin-aarch64`, `linux-x86_64`, … |
+| `setLogLevel(level)` | how much the engine says |
+| `setLogHandler(handler \| null)` | `handler(level, text)`; `null` restores stderr |
+| `LogLevel` | frozen `{ NONE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 }` |
+| `ModelError` | any failure the core reports |
+| `NativeLibraryNotFoundError` | the bridge could not be located or loaded |
+| `Chat`, `Embedder` | below |
+
+The bridge defaults to `WARN`. Call `setLogLevel` **before** constructing a `Chat` —
+llama.cpp starts logging during load.
+
+## `Chat`
+
+```js
+const chat = new Chat('model.gguf', { nCtx: 8192 })
+const r = chat.infer({ messages: [{ role: 'user', content: 'hello' }], max_tokens: 64 })
+console.log(r.text, r.usage.total_tokens)
+chat.close()
+```
+
+`new Chat(ggufPath, { nCtx, nBatch, nSeqMax, onEvent })`. Those three are fixed when the
+context is built; everything else goes per request.
+
+### `infer(request, onToken?)`
+
+`request` is the wire object. `jsonSchema` and `reuseCache` are renamed to their snake_case
+wire names for you; **every other key passes through untouched**, so `temperature`, `top_k`,
+`top_p`, `min_p`, `max_tokens`, `repeat_penalty`, `seed` and `stop` are spelled as the core
+spells them, and a new core parameter needs no release here.
+
+Returns the response object: `type`, `text`, `tool_calls`, `finish_reason`, `usage`. Failures
+throw `ModelError`.
+
+Pass `onToken` to stream. **Only an explicit `false` stops generation** — the usual callback
+writes a piece and returns `undefined`, and treating that as "stop" would cancel every stream
+after its first token. A stopped run still returns the complete response, with the text so
+far and `finish_reason: 'cancelled'`.
+
+```js
+const r = chat.infer(
+  { messages: [{ role: 'user', content: 'Count: 1 2 3' }], max_tokens: 24, seed: 1 },
+  (piece) => { process.stdout.write(piece); },
+)
+```
+
+### The rest
+
+| method | notes |
+|---|---|
+| `countTokens(request)` | `{ tokens, nCtx }`; no decode, cache untouched |
+| `loadLora(path, scale = 1.0)` | returns the adapter id |
+| `setLoraScale(id, scale)` | takes effect next inference |
+| `removeLora(id)` | unloads one, reapplies the rest |
+| `clearLoras()` | no-op on an empty set |
+| `loras()` | `[{ id, path, scale }, …]` in order |
+| `close()` | idempotent. Also releases the pinned event callback |
+
+## `Embedder`
+
+```js
+new Embedder(ggufPath, { pooling, nCtx, nBatch, onEvent })
+```
+
+`pooling` is `'mean' | 'cls' | 'last' | 'rank' | 'none'`. Separate from `Chat` because
+embedding needs a context built with embeddings enabled and a pooling strategy fixed at
+creation — and reranking needs `'rank'` specifically.
+
+| method | notes |
+|---|---|
+| `embed(texts, { normalize = true })` | one string or an array; one vector per input, in input order |
+| `rerank(query, documents, { topN })` | `[{ index, score }, …]` best first |
+| `close()` | idempotent |
+
+`index` is the document's position in the array you passed in, because results come back
+reordered. `score` is a raw logit — comparable within one call, not across models, not a
+probability.
+
+```js
+const rr = new Embedder('bge-reranker-v2-m3-Q4_K_M.gguf', { pooling: 'rank' })
+for (const hit of rr.rerank('capital of France?', docs, { topN: 3 })) {
+  console.log(hit.index, hit.score)
+}
+rr.close()
+```
+
+## Errors
+
+`ModelError` carries `.code` and `.modelMessage`. `.code` is stable and identical across
+every language binding; the message is for humans. Branch on the code.
+
+```js
+try {
+  emb.rerank('q', ['a'])
+} catch (e) {
+  if (e.code === 'POOLING_NOT_RANK') { /* ... */ }
+}
+```
+
+`NativeLibraryNotFoundError` carries `.searched` — every path that was tried — and `.cause`.
+
+[Why a C ABI →](/modelnexus/why-c-abi/)

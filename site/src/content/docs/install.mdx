@@ -1,0 +1,117 @@
+---
+title: Install
+description: Add modelnexus to a Go, Python or JavaScript project, get the native library, and get a GGUF model.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```bash
+go get github.com/muthuishere/modelnexus/bindings/go
+```
+</TabItem>
+<TabItem label="Python">
+```bash
+pip install muthuishere-modelnexus     # the import is still `modelnexus`
+```
+</TabItem>
+<TabItem label="JavaScript">
+```bash
+npm install @muthuishere/modelnexus
+```
+</TabItem>
+</Tabs>
+
+The PyPI *distribution* is `muthuishere-modelnexus` because `modelnexus` is held by an
+unrelated project. `import modelnexus` is unchanged.
+
+## What is actually published today
+
+| ecosystem | state |
+|---|---|
+| Go | **Published.** `@v0.1.0` resolves from the public proxy; inference verified from outside the repo. |
+| npm | **Not published.** The workflow is wired and the tarballs were packed and installed locally; the publish leg fails on `ENEEDAUTH`. |
+| PyPI | **Not published.** OIDC token is valid; PyPI has no publisher registered to match it yet. |
+
+`PUBLISHING.md` in the repo is the current truth. Until npm and PyPI land, install the
+Python and JS bindings from a checkout and point them at a local build — see
+[MODELNEXUS_LIB](#modelnexus_lib) below.
+
+## The native library
+
+Three ways it reaches you, one per ecosystem ([ADR-0007](https://github.com/muthuishere/modelnexus/blob/main/docs/adr/0007-how-natives-reach-each-ecosystem.md)):
+
+| | how |
+|---|---|
+| Python | inside the wheel |
+| JavaScript | a separate per-platform package, pulled in by `optionalDependencies`, so npm installs only the one that matches |
+| Go | fetched at runtime — a Go module is a source tree, and bundling every platform would make each `go get` pull ~70 MB nobody uses |
+
+In Go, download it once and point the loader at it:
+
+```go
+dir, err := modelnexus.Fetch()      // ~14 MB into the OS user cache, once
+if err != nil { log.Fatal(err) }
+os.Setenv("MODELNEXUS_LIB", dir)    // the loader does not read the cache on its own
+```
+
+Published platforms: **linux-x86_64, darwin-aarch64, windows-x86_64**. Intel macOS is
+staged by hand, not built in CI — GitHub's Intel runners queue indefinitely and one job
+that never starts blocks the publish for every platform that did.
+
+CPU and Metal. No CUDA in the published builds.
+
+Skip the step entirely and you get a typed error listing every path searched. Never a
+segfault.
+
+### MODELNEXUS_LIB
+
+Point it at the library file, or the directory holding it. It wins over every other
+candidate in all three bindings — use it for an air-gapped machine, a vendored copy, or
+a build you made yourself.
+
+```bash
+git clone https://github.com/muthuishere/modelnexus && cd modelnexus
+./core/build.sh                                  # downloads llama.cpp's prebuilt libs,
+                                                 # compiles only our bridge — seconds
+export MODELNEXUS_LIB=$PWD/core/dist/darwin-aarch64
+```
+
+`./core/build.sh --source` builds llama.cpp too, when you want the whole thing yourself.
+On Windows use `core\build.cmd`, which defaults to source mode: llama.cpp's Windows
+archive ships 29 DLLs and zero `.lib` import libraries, and MSVC cannot link a DLL
+without one.
+
+## A model
+
+modelnexus loads GGUF, and only GGUF. Get one from Hugging Face — every popular open
+model has a GGUF quantisation, and a 1.5B at `q4_k_m` is about 1 GB and runs on a laptop
+CPU. These docs use `qwen2.5-1.5b-instruct-q4_k_m.gguf` throughout.
+
+**One hard requirement: the model's chat template must support tool calling.** A model
+without one is rejected at load rather than silently degraded. Check before you commit to
+a multi-gigabyte download:
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+info, err := modelnexus.Info("model.gguf")   // loads no context, creates no engine
+fmt.Println(info.SupportsTools, info.ChatFormat)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+info = modelnexus.model_info("model.gguf")   # loads no context, creates no engine
+print(info["supports_tools"], info["chat_format"])
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const info = modelInfo('model.gguf')         // loads no context, creates no engine
+console.log(info.supports_tools, info.chat_format)
+```
+</TabItem>
+</Tabs>
+
+[Quickstart →](/modelnexus/quickstart/)

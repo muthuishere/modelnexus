@@ -1,0 +1,95 @@
+---
+title: Why a C ABI
+description: One implementation of the hard part, four thin bindings, and a new parameter that costs no symbol anywhere.
+---
+
+The alternative is one implementation of the hardest code in the stack **per language** — a
+separate set of bugs each, a separate reading of the same llama.cpp behaviour, and drift no
+test catches because every suite passes on its own.
+
+So there is one C surface, and per language a thin binding whose only jobs are: marshal,
+call, free, present the result in the language's idiom.
+
+A binding **must not** add behaviour, reinterpret or repair a core result, cache state the
+core does not, or work around a core bug locally. If a language needs something, it goes in
+the ABI, in the spec, and then in every binding — or it does not exist.
+
+## JSON in, JSON out
+
+Generation parameters travel **inside** the request JSON, not as C arguments. Adding
+`min_p` costs:
+
+| | |
+|---|---|
+| exported symbols changed | 0 |
+| binding signatures changed | 0 |
+| ABI versions burned | 0 |
+
+Contrast the shape everyone reaches for first — one C parameter per option. Each new sampler
+knob is a new signature, every binding touched, every package released, and either a break or
+a `_v2` suffix that never goes away.
+
+The same trick collapses whole feature families into one symbol. Every LoRA operation —
+`load`, `set`, `remove`, `clear`, `list` — is `llb_chat_lora` dispatched on an `"op"` field.
+A sixth operation is a core change and a doc change, and nothing else.
+
+The trade is real: the type checker cannot help you. A misspelled request key is silently
+ignored rather than a compile error, which is why each binding names the fields it supports
+in its own types and passes the rest through.
+
+## Opaque handles
+
+`llb_chat_t*` is a pointer you never dereference. llama.cpp's C++ types never cross the
+boundary, so there is no ABI to break when they change, no name mangling to match, and
+nothing for a garbage collector to trace. The handle is an integer as far as any binding is
+concerned — Go types it `uintptr` precisely so the collector has nothing to move.
+
+## Why not a server
+
+A local HTTP server plus a thin client per language is easier to build. It forfeits the
+entire proposition.
+
+| | in-process | localhost server |
+|---|---|---|
+| processes to ship | 1 | 2 |
+| supervision, health checks, restart-on-crash | none | yours to write |
+| port, and the conflict on it | none | yes |
+| your data | stays in your address space | crosses a socket |
+| per-call cost | a function call | serialise, syscall, deserialise |
+| dies at 3am without telling you | cannot | famously |
+
+gRPC and an OpenAI-shaped HTTP endpoint are both good things to build **on top of** the core.
+Neither can be the core, because you cannot subtract a daemon from a design that assumed one.
+
+## What it costs
+
+**Manual memory discipline.** Every string the ABI returns is `malloc`'d and yours to free
+with `llb_string_free`. A binding whose FFI helpfully converts a `char*` return into a native
+string has thrown away the pointer and leaks every result. This is not a hypothetical — it is
+why Go's binding declares those returns `unsafe.Pointer`.
+
+**A native build per platform.** Five of them: linux x64/arm64, darwin x64/arm64, windows
+x64. Roughly 14 MB each. Every release compiles all of them, and a platform without a build
+is a platform without modelnexus.
+
+**No GC across the boundary.** Callbacks are the sharp edge. The core *retains* the event and
+log callbacks for the life of the handle, so a trampoline collected when the constructor
+returns crashes later, from somewhere unrelated. It does not fail cleanly; it segfaults.
+Every binding pins those callbacks deliberately, and there is a test whose only job is to
+prove it.
+
+**No exceptions may cross it.** The bridge is C++ with its own unwinding. A managed or
+interpreted exception passing through a callback frame is undefined behaviour, so bindings
+catch, stop generation, and re-raise after the native call returns.
+
+**A versioned public contract.** Breaking the ABI breaks applications, not someone's
+afternoon. Two signature changes were taken deliberately before any external consumer existed
+— the token callback's `int` return and the create config parameter — because that window
+closes the day this site ships.
+
+Bindings that cannot drift is a claim, so it is tested: every binding runs the same
+schema-constrained request and must return **byte-identical text and an identical token
+count**. A binding that quietly reshapes a result fails that gate while passing its own suite.
+
+The ABI decides the shape. The model decides everything else.
+[Choosing a model →](/modelnexus/models/)

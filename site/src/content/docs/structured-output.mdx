@@ -1,0 +1,163 @@
+---
+title: Structured output
+description: A JSON Schema or a raw GBNF grammar constrains the sampler. The result is guaranteed to parse.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Give a request a `json_schema` and the model can only emit text matching it. The schema is
+compiled to a grammar and the sampler is masked by it, token by token — an invalid token
+is not merely unlikely, it has no probability at all.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+req := modelnexus.Request{
+	Messages: []modelnexus.Message{{Role: "user", Content: "Describe Paris."}},
+	JSONSchema: map[string]any{        // a map, or any struct that marshals to a schema
+		"type": "object",
+		"properties": map[string]any{
+			"city":       map[string]any{"type": "string"},
+			"population": map[string]any{"type": "integer"},
+		},
+		"required":             []string{"city", "population"},
+		"additionalProperties": false,
+	},
+}
+resp, err := chat.Infer(req)
+
+var got map[string]any
+err = json.Unmarshal([]byte(resp.Text), &got)   // err is nil
+```
+</TabItem>
+<TabItem label="Python">
+```python
+r = chat.infer(
+    [{"role": "user", "content": "Describe Paris."}],
+    json_schema={
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "population": {"type": "integer"}},
+        "required": ["city", "population"],
+        "additionalProperties": False,
+    },
+)
+
+value = json.loads(r["text"])   # never raises
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const r = chat.infer({
+  messages: [{ role: 'user', content: 'Describe Paris.' }],
+  jsonSchema: {
+    type: 'object',
+    properties: { city: { type: 'string' }, population: { type: 'integer' } },
+    required: ['city', 'population'],
+    additionalProperties: false,
+  },
+})
+
+const value = JSON.parse(r.text)   // never throws
+```
+</TabItem>
+</Tabs>
+
+`additionalProperties: false` is honoured. So is `required`. So are the types.
+
+## The fence, and why the guarantee is real
+
+llama.cpp derives the grammar from your schema, and the grammar it derives **permits a
+markdown code fence**. Its root rule, observed rather than theorised:
+
+```text
+root ::= "<|im_start|>assistant\n" space space ("```json" space response-format space "```" | response-format)
+```
+
+Fenced output is therefore *grammar-conformant*. A core that returned raw text would hand
+you a string that satisfies the constraint and still fails `json.loads`. So the core parses
+and strips the fence before returning.
+
+This is the difference between "schema-constrained" as a feature name and as a promise. It
+is also why every binding's test asserts on the **parsed value**, never on a substring — a
+fence is invisible to `strings.Contains` and fatal to `JSON.parse`.
+
+## Raw GBNF
+
+For anything a JSON Schema cannot say — an enum of literals, a line format, a DSL — pass a
+grammar directly.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+req.Grammar = `root ::= "red" | "blue"`
+resp, _ := chat.Infer(req)
+// resp.Text is "red" or "blue". There is no third outcome.
+```
+</TabItem>
+<TabItem label="Python">
+```python
+r = chat.infer(msgs, grammar='root ::= "red" | "blue"')
+assert r["text"].strip() in ("red", "blue")
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const r = chat.infer({ messages, grammar: 'root ::= "red" | "blue"' })
+// r.text.trim() is 'red' or 'blue'
+```
+</TabItem>
+</Tabs>
+
+The two sources compile to different grammar *types* — a schema grammar prefills the
+generation prompt into the grammar sampler, a caller-supplied GBNF must not. The core maps
+each to its own; you never see it.
+
+## Both is an error
+
+Setting `json_schema` and `grammar` on one request fails with code `INVALID_REQUEST`. It
+does not pick a winner.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+req.JSONSchema = map[string]any{"type": "object"}
+req.Grammar = `root ::= "x"`
+
+_, err := chat.Infer(req)
+var me *modelnexus.Error
+errors.As(err, &me)
+// me.Code == "INVALID_REQUEST"
+```
+</TabItem>
+<TabItem label="Python">
+```python
+with pytest.raises(mx.ModelError) as e:
+    chat.infer(msgs, json_schema={"type": "object"}, grammar='root ::= "x"')
+assert e.value.code == "INVALID_REQUEST"
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+assert.throws(
+  () => chat.infer({ messages, jsonSchema: { type: 'object' }, grammar: 'root ::= "x"' }),
+  (e) => e.code === 'INVALID_REQUEST',
+)
+```
+</TabItem>
+</Tabs>
+
+A precedence rule would be quieter and much worse: two output constraints, one silently
+ignored, and a debugging session that starts with "but I set the schema". The rejection
+comes from the **core**, in the same error code in every language — no binding pre-empts it
+locally, or the bindings would drift.
+
+## What it costs
+
+- **Latency.** Constrained sampling masks the logit vector on every token. Small, real,
+  and it grows with the size of the grammar.
+- **Content, not just shape.** A schema forces the *form*. It does not make the numbers
+  true. A constrained answer can be perfectly shaped and wrong.
+- **Small models overfit the shape.** Ask a 1.5B for eight required fields and it will fill
+  all eight, plausibly, whether or not it knows them. Require less.
+
+[Streaming and cancellation →](/modelnexus/streaming/)

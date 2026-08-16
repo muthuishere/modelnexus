@@ -1,0 +1,124 @@
+---
+title: Reranking
+description: A cross-encoder scores query and document together. Requires rank pooling, returns original indices, and the scores are raw logits.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A reranker reads the query and the document **together, in one forward pass**, and emits a
+relevance score. An embedding model never sees them together: it compresses each into a
+vector separately and you compare the vectors afterwards.
+
+That difference is the whole point. Cosine similarity has to survive compression into a few
+hundred dimensions computed without knowing the question; a cross-encoder attends between
+the query's tokens and the document's. So: retrieve 100 candidates with vectors because it
+is cheap and index-friendly, then rerank the top 100 down to 5 because it is accurate. In
+that order, and only in that order — a cross-encoder over a whole corpus is one forward pass
+per document.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+rr, err := modelnexus.OpenEmbedder("bge-reranker-v2-m3-Q4_K_M.gguf", &modelnexus.EmbedOptions{
+    Pooling: modelnexus.PoolingRank,
+    NCtx:    512,
+})
+defer rr.Close()
+
+docs := []string{
+    "Berlin is the capital and largest city of Germany.",
+    "Paris has been France's capital since the 10th century.",
+    "Bananas are a good source of potassium.",
+}
+hits, _ := rr.Rerank("What is the capital of France?", docs, 0) // 0 = all
+for _, h := range hits {
+    fmt.Println(h.Score, docs[h.Index])
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from modelnexus import Embedder
+
+docs = [
+    "Berlin is the capital and largest city of Germany.",
+    "Paris has been France's capital since the 10th century.",
+    "Bananas are a good source of potassium.",
+]
+with Embedder("bge-reranker-v2-m3-Q4_K_M.gguf", pooling="rank", n_ctx=512) as rr:
+    for hit in rr.rerank("What is the capital of France?", docs):
+        print(hit["score"], docs[hit["index"]])
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+import { Embedder } from '@muthuishere/modelnexus'
+
+const docs = [
+  'Berlin is the capital and largest city of Germany.',
+  "Paris has been France's capital since the 10th century.",
+  'Bananas are a good source of potassium.',
+]
+const rr = new Embedder('bge-reranker-v2-m3-Q4_K_M.gguf', { pooling: 'rank', nCtx: 512 })
+for (const hit of rr.rerank('What is the capital of France?', docs)) {
+  console.log(hit.score, docs[hit.index])
+}
+rr.close()
+```
+</TabItem>
+</Tabs>
+
+Ask for fewer: `topN` / `top_n` / the third argument returns only the best N. The model
+still scores every document — this trims the result, not the work.
+
+## `rank` pooling, or nothing
+
+`Rerank` **requires** a model opened with `pooling: "rank"`. That pooling type is what
+attaches the model's classification head to the graph; without it there is no head to read.
+
+Call it on a `mean`-pooled engine and you get a typed error, not a number:
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+_, err := emb.Rerank("q", []string{"a"}, 0)
+// err.(*modelnexus.Error).Code == "POOLING_NOT_RANK"
+```
+</TabItem>
+<TabItem label="Python">
+```python
+try:
+    emb.rerank("q", ["a"])
+except ModelError as e:
+    assert e.code == "POOLING_NOT_RANK"
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+assert.throws(() => emb.rerank('q', ['a']), (e) => e.code === 'POOLING_NOT_RANK')
+```
+</TabItem>
+</Tabs>
+
+Failing is the feature. Numbers that look like scores and are not would be found six months
+later, by someone else.
+
+## Read the result correctly
+
+Results come back **sorted best-first**, which means they are no longer in your order.
+`index` is the document's position in the list **you passed in**. Use it to map back; never
+assume result *i* is document *i*.
+
+`score` is a **raw model logit**:
+
+- Comparable **within one call**. Higher is better; the ordering is the product.
+- Not comparable across models. A different reranker has a different scale.
+- Not a probability. Do not threshold at 0.5, and do not show it to a user as a percentage.
+- Negative is normal. Verified across all bindings on one query: `+6.591`, `−5.161`,
+  `−11.004` — same model, same three documents, byte-identical in every language.
+
+If you need a cutoff, calibrate one on your own data against your own model, and re-do it
+when you change either.
+
+Behaviour comes from adapters, not from vectors.
+[LoRA adapters →](/modelnexus/lora/)

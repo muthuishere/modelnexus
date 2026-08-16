@@ -1,0 +1,145 @@
+---
+title: Go
+description: Every exported type and function in github.com/muthuishere/modelnexus/bindings/go.
+---
+
+```go
+import modelnexus "github.com/muthuishere/modelnexus/bindings/go"
+```
+
+No cgo. The bridge is loaded at runtime with purego, so `CGO_ENABLED=0` and
+cross-compilation both keep working.
+
+## Package functions
+
+| function | purpose |
+|---|---|
+| `Open(path string, opts ...Option) (*Chat, error)` | load a GGUF and build a generation context |
+| `OpenEmbedder(path string, opts *EmbedOptions) (*Embedder, error)` | load a model for embedding or reranking |
+| `Info(path string) (ModelInfo, error)` | tool-calling capability without loading an engine |
+| `Version() (string, error)` | bridge version and the linked llama.cpp tag |
+| `PlatformKey() string` | `darwin-aarch64`, `linux-x86_64`, … |
+| `Fetch() (string, error)` | download this platform's natives into the cache; returns the directory |
+| `CacheDir() (string, error)` | where `Fetch` puts them (`MODELNEXUS_CACHE`, else the OS cache dir) |
+| `SetLogLevel(LogLevel) error` | how much the engine says |
+| `SetLogHandler(func(LogLevel, string)) error` | route engine logs to you; `nil` restores stderr |
+
+| constant | value |
+|---|---|
+| `LlamaTag` | the llama.cpp release the natives are built against |
+| `FinishCancelled` | `"cancelled"` — the `FinishReason` of a stopped generation |
+
+Go is the one binding that does not get the shared library from its package manager
+(ADR-0007). Resolution order: `MODELNEXUS_LIB`, then `core/dist/<platform>/` walking up from
+the working directory. Missing it yields `*ErrNativeLibraryNotFound`, which lists every path
+searched — never a segfault.
+
+## Options for `Open`
+
+| option | default |
+|---|---|
+| `WithContextSize(n int)` | 4096 tokens. Create-time; it is the size of the KV cache |
+| `WithBatchSize(n int)` | 512 |
+| `WithMaxSequences(n int)` | 1. No observable effect yet; reserved so slots can arrive without an ABI break |
+| `WithEventHandler(func(string))` | none. Receives the core's progress events for the life of the handle |
+
+## `Chat`
+
+```go
+chat, err := modelnexus.Open("model.gguf", modelnexus.WithContextSize(8192))
+defer chat.Close()
+```
+
+| method | notes |
+|---|---|
+| `Infer(Request) (*Response, error)` | one turn |
+| `InferStream(Request, func(piece string) bool) (*Response, error)` | `onToken` returns **keep going**; `false` stops |
+| `InferContext(ctx, Request) (*Response, error)` | cancellation checked once per decoded token |
+| `InferStreamContext(ctx, Request, func(string) bool) (*Response, error)` | either can stop it |
+| `CountTokens(Request) (TokenCount, error)` | no decode, does not disturb the cache |
+| `LoadLoRA(path string, scale float64) (int, error)` | returns the adapter id |
+| `SetLoRAScale(id int, scale float64) error` | takes effect next inference |
+| `RemoveLoRA(id int) error` | unloads one, reapplies the rest |
+| `ClearLoRAs() error` | no-op on an empty set |
+| `LoRAs() ([]Adapter, error)` | what is applied, in order |
+| `Close() error` | idempotent |
+
+A cancelled run returns a **normal response** with `FinishCancelled` and a `nil` error. The
+tokens were generated and the usage counts are real; throwing them away to return `ctx.Err()`
+would lose the one thing you paid for. Use `Response.Cancelled()` or `ctx.Err()` to tell the
+two cases apart.
+
+## `Embedder`
+
+```go
+emb, err := modelnexus.OpenEmbedder("bge-small.gguf", &modelnexus.EmbedOptions{
+    Pooling: modelnexus.PoolingMean, NCtx: 512,
+})
+defer emb.Close()
+```
+
+| method | notes |
+|---|---|
+| `Embed([]string) ([][]float32, error)` | L2-normalised, input order |
+| `EmbedRaw([]string) ([][]float32, error)` | the same without normalisation |
+| `Rerank(query string, docs []string, topN int) ([]RerankHit, error)` | `topN <= 0` returns all; needs `PoolingRank` |
+| `Close() error` | idempotent |
+
+`EmbedOptions{Pooling Pooling; NCtx, NBatch int; OnEvent func(string)}`. Pooling constants:
+`PoolingMean`, `PoolingCLS`, `PoolingLast`, `PoolingRank`, `PoolingNone`.
+
+## Types
+
+### `Request`
+
+Generation parameters are **pointers**. A `Temperature` of `0` is a legitimate — and very
+different — request from "use the default", and a plain `float64` cannot express both.
+
+```go
+type Request struct {
+    Messages   []Message
+    Tools      []Tool
+    ToolChoice string      // "auto" | "none" | "required"
+
+    Temperature   *float64
+    TopK          *int
+    TopP          *float64
+    MinP          *float64
+    MaxTokens     *int
+    RepeatPenalty *float64
+    Seed          *uint32
+    Stop          []string
+
+    JSONSchema any    // any value that marshals to a JSON Schema object
+    Grammar    string // raw GBNF. Setting both is INVALID_REQUEST, not a precedence rule
+    ReuseCache *bool  // nil means the core decides (reuse on)
+}
+```
+
+`ReuseCacheOn()` and `ReuseCacheOff()` return the `*bool` those last fields need.
+
+### The rest
+
+| type | fields |
+|---|---|
+| `Message` | `Role, Content, ToolCallID string; ToolCalls []ToolCall` |
+| `ToolCall` | `ID, Name, Arguments string` — emitted, never executed |
+| `Tool` / `ToolFunction` | OpenAI shape: `Type`, `Function{Name, Description, Parameters any}` |
+| `Response` | `Type, Text, FinishReason string; ToolCalls []ToolCall; Usage`; method `Cancelled() bool` |
+| `Usage` | `PromptTokens, CompletionTokens, TotalTokens int` |
+| `TokenCount` | `Tokens, NCtx int` — the count only means something against the window |
+| `ModelInfo` | `SupportsTools, SupportsToolCalls, HasToolUseTemplate bool; ChatFormat, Error string` |
+| `Adapter` | `ID int; Path string; Scale float64` |
+| `RerankHit` | `Index int` (position in the **original** slice); `Score float64` (a raw logit) |
+| `Error` | `Code, Message string`. `Code` is identical across every binding |
+| `ErrNativeLibraryNotFound` | `Searched []string; Cause error`; supports `Unwrap` |
+| `LogLevel` | `LogNone`, `LogDebug`, `LogInfo`, `LogWarn` (default), `LogError` |
+
+Errors are matched with `errors.As`:
+
+```go
+var me *modelnexus.Error
+if errors.As(err, &me) && me.Code == "POOLING_NOT_RANK" { /* ... */ }
+```
+
+[Python reference →](/modelnexus/api/python/)

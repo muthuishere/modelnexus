@@ -1,0 +1,183 @@
+---
+title: Quickstart
+description: An answer, then a JSON object, then a live stream — in one page.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Three programs. Each one runs as written, against a GGUF on disk. If you have neither
+the library nor a model yet, start at [Install](/modelnexus/install/).
+
+## 1. An answer
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	modelnexus "github.com/muthuishere/modelnexus/bindings/go"
+)
+
+func main() {
+	chat, err := modelnexus.Open("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer chat.Close()
+
+	max := 64
+	resp, err := chat.Infer(modelnexus.Request{
+		Messages:  []modelnexus.Message{{Role: "user", Content: "Name the capital of France in one word."}},
+		MaxTokens: &max,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(resp.Text, resp.Usage.CompletionTokens)
+}
+```
+
+Generation parameters are **pointers**. That is what makes `Temperature: 0` — greedy
+decoding — distinguishable from "I did not set a temperature".
+</TabItem>
+<TabItem label="Python">
+```python
+from modelnexus import Chat
+
+with Chat("qwen2.5-1.5b-instruct-q4_k_m.gguf") as chat:
+    r = chat.infer(
+        [{"role": "user", "content": "Name the capital of France in one word."}],
+        max_tokens=64,
+    )
+    print(r["text"], r["usage"]["completion_tokens"])
+```
+
+`Chat` holds a native handle, so close it. The context manager is the reliable way.
+</TabItem>
+<TabItem label="JavaScript">
+```js
+import { Chat } from '@muthuishere/modelnexus'
+
+const chat = new Chat('qwen2.5-1.5b-instruct-q4_k_m.gguf')
+try {
+  const r = chat.infer({
+    messages: [{ role: 'user', content: 'Name the capital of France in one word.' }],
+    max_tokens: 64,
+  })
+  console.log(r.text, r.usage.completion_tokens)
+} finally {
+  chat.close()
+}
+```
+
+Generation parameters keep their wire names (`max_tokens`, `top_k`, `repeat_penalty`).
+Only `jsonSchema` and `reuseCache` are camelCase, because only those two are named by the
+binding itself.
+</TabItem>
+</Tabs>
+
+`Open` / `Chat(...)` loads the model and builds a context. It costs seconds and hundreds
+of megabytes. Do it once and keep the handle; do not open one per request.
+
+A model whose chat template cannot do tool calling is **rejected here**, with code
+`MODEL_NOT_TOOL_CAPABLE`. Silent degradation would be worse.
+
+## 2. A JSON object
+
+Hand it a schema and the sampler cannot produce anything else.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+temp, seed, max := 0.0, uint32(42), 120
+resp, err := chat.Infer(modelnexus.Request{
+	Messages:    []modelnexus.Message{{Role: "user", Content: "Describe Paris."}},
+	Temperature: &temp,
+	Seed:        &seed,
+	MaxTokens:   &max,
+	JSONSchema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"city":    map[string]any{"type": "string"},
+			"country": map[string]any{"type": "string"},
+		},
+		"required":             []string{"city", "country"},
+		"additionalProperties": false,
+	},
+})
+
+var got map[string]any
+json.Unmarshal([]byte(resp.Text), &got)   // does not fail
+```
+</TabItem>
+<TabItem label="Python">
+```python
+r = chat.infer(
+    [{"role": "user", "content": "Describe Paris."}],
+    max_tokens=120, seed=42, temperature=0.0,
+    json_schema={
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "country": {"type": "string"}},
+        "required": ["city", "country"],
+        "additionalProperties": False,
+    },
+)
+
+json.loads(r["text"])   # does not raise
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const r = chat.infer({
+  messages: [{ role: 'user', content: 'Describe Paris.' }],
+  max_tokens: 120, seed: 42, temperature: 0,
+  jsonSchema: {
+    type: 'object',
+    properties: { city: { type: 'string' }, country: { type: 'string' } },
+    required: ['city', 'country'],
+    additionalProperties: false,
+  },
+})
+
+JSON.parse(r.text)   // does not throw
+```
+</TabItem>
+</Tabs>
+
+[Structured output](/modelnexus/structured-output/) covers raw GBNF grammars and the trap
+that makes the parse guarantee real.
+
+## 3. A stream
+
+The callback is handed each decoded piece. The full response still comes back at the end.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+resp, err := chat.InferStream(req, func(piece string) bool {
+	fmt.Print(piece)
+	return true          // false stops generation on this token
+})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+r = chat.infer(messages, max_tokens=300, on_token=lambda piece: print(piece, end=""))
+# returning None keeps going — only an explicit False stops
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const r = chat.infer(request, (piece) => process.stdout.write(piece))
+// returning undefined keeps going — only an explicit false stops
+```
+</TabItem>
+</Tabs>
+
+That is the whole surface for generation. Everything past this point is detail.
+
+[Structured output →](/modelnexus/structured-output/)

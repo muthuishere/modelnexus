@@ -1,0 +1,119 @@
+---
+title: LoRA adapters
+description: Load, scale, stack and remove adapters on a live model. Adapters change behaviour, not knowledge.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+**A LoRA adapter changes how a model behaves. It does not add what the model knows.**
+
+Format, tone, refusal style, tool-call reliability, house voice: those move. Facts do not.
+Training an adapter on your documentation does not put your documentation in the model — it
+teaches the model to *sound like* your documentation while inventing the contents. The
+output gets more confident and no more correct, which is the worst possible direction.
+
+For facts, retrieve: [embeddings](/modelnexus/embeddings/) to find candidates,
+[reranking](/modelnexus/reranking/) to pick, then put the text in the prompt. Use an adapter
+to fix the *shape* of the answer, never its substance.
+
+With that settled:
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+chat, _ := modelnexus.Open("qwen2.5-3b-instruct-q4_k_m.gguf")
+defer chat.Close()
+
+id, _ := chat.LoadLoRA("house-style.gguf", 1.0)
+
+resp, _ := chat.Infer(modelnexus.Request{
+    Messages: []modelnexus.Message{{Role: "user", Content: "Summarise the incident."}},
+})
+
+chat.SetLoRAScale(id, 0.5)   // half strength, next inference on
+chat.RemoveLoRA(id)          // this one off, the rest stay
+chat.ClearLoRAs()            // back to the base model
+```
+</TabItem>
+<TabItem label="Python">
+```python
+with modelnexus.Chat("qwen2.5-3b-instruct-q4_k_m.gguf") as chat:
+    adapter = chat.load_lora("house-style.gguf", 1.0)
+
+    r = chat.infer([{"role": "user", "content": "Summarise the incident."}])
+
+    chat.set_lora_scale(adapter, 0.5)   # half strength, next inference on
+    chat.remove_lora(adapter)           # this one off, the rest stay
+    chat.clear_loras()                  # back to the base model
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const chat = new Chat('qwen2.5-3b-instruct-q4_k_m.gguf')
+
+const id = chat.loadLora('house-style.gguf', 1.0)
+
+const r = chat.infer({ messages: [{ role: 'user', content: 'Summarise the incident.' }] })
+
+chat.setLoraScale(id, 0.5)   // half strength, next inference on
+chat.removeLora(id)          // this one off, the rest stay
+chat.clearLoras()            // back to the base model
+chat.close()
+```
+</TabItem>
+</Tabs>
+
+No reload, no second handle. The model stays resident and the adapter set changes underneath
+it between inferences.
+
+## Stack them
+
+Several adapters can be active at once. They apply in load order, each with its own scale,
+and ids stay stable as others come and go. Ask the core what is applied rather than tracking
+it yourself — every LoRA operation returns the full adapter set afterwards.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+a, _ := chat.LoadLoRA("format.gguf", 1.0)
+b, _ := chat.LoadLoRA("tone.gguf", 0.25)
+
+applied, _ := chat.LoRAs()
+// []Adapter{{ID: a, Path: "format.gguf", Scale: 1}, {ID: b, Path: "tone.gguf", Scale: 0.25}}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+a = chat.load_lora("format.gguf", 1.0)
+b = chat.load_lora("tone.gguf", 0.25)
+
+chat.loras()
+# [{"id": a, "path": "format.gguf", "scale": 1.0}, {"id": b, "path": "tone.gguf", "scale": 0.25}]
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const a = chat.loadLora('format.gguf', 1.0)
+const b = chat.loadLora('tone.gguf', 0.25)
+
+chat.loras()
+// [{ id: a, path: 'format.gguf', scale: 1 }, { id: b, path: 'tone.gguf', scale: 0.25 }]
+```
+</TabItem>
+</Tabs>
+
+Scale is the dial. `1.0` is the adapter as trained; lower blends it toward the base; stacking
+two at full strength usually degrades both. Start at `1.0` alone, then tune down.
+
+## Where it breaks
+
+- **An adapter and its base are a matched pair.** LoRA weights are deltas onto specific
+  tensors of a specific architecture. A Qwen2.5-3B adapter does not load against
+  Qwen2.5-1.5B, and nothing about the filename will warn you.
+- Loading a missing or mismatched adapter fails with `LORA_LOAD_FAILED`; touching an unknown
+  id fails with `LORA_NOT_FOUND`. Same codes in every binding.
+- Clearing an empty set is a no-op, not an error. You never have to check first.
+- Scales take effect on the **next** inference, not mid-generation.
+
+Fifteen entry points hold all of this up.
+[The C ABI →](/modelnexus/abi/)
