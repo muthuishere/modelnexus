@@ -130,6 +130,47 @@ int main(void) {
         llb_string_free(r);
     }
 
+    /* --- cache: inspect and drop ---------------------------------------
+       The assertion that matters is that "clear" is OBSERVABLE. A clear that
+       silently did nothing would still return a well-formed response, and the
+       next inference would still be correct — just slow, and still holding the
+       previous tenant's conversation. So: infer, see a non-zero cache, clear,
+       see zero, then infer again and prove the handle still works. */
+    {
+        const char* r0 = llb_chat_infer(chat, CONV1);
+        llb_string_free(r0);
+
+        const char* st = llb_chat_cache(chat, "{\"op\":\"status\"}");
+        ok(has(st, "\"type\":\"cache\""), "llb_chat_cache reports status");
+        ok(!has(st, "\"tokens\":0"), "after an inference the cache is not empty");
+        printf("        before: %s\n", st ? st : "(null)");
+        llb_string_free(st);
+
+        const char* cl = llb_chat_cache(chat, "{\"op\":\"clear\"}");
+        ok(has(cl, "\"tokens\":0"), "clear empties the cache, and says so");
+        printf("        after:  %s\n", cl ? cl : "(null)");
+        llb_string_free(cl);
+
+        const char* st2 = llb_chat_cache(chat, "{\"op\":\"status\"}");
+        ok(has(st2, "\"tokens\":0"), "the clear persisted — status agrees");
+        llb_string_free(st2);
+
+        const char* after = llb_chat_infer(chat, CONV1);
+        ok(has(after, "Paris"), "the engine still works after a clear");
+        llb_string_free(after);
+
+        /* A default (empty) request is a status read, not a destructive op —
+           getting that backwards would make an innocent-looking call wipe a
+           conversation. */
+        const char* def = llb_chat_cache(chat, NULL);
+        ok(!has(def, "\"tokens\":0"), "a NULL request reads status, it does not clear");
+        llb_string_free(def);
+
+        const char* bad = llb_chat_cache(chat, "{\"op\":\"obliterate\"}");
+        ok(has(bad, "INVALID_REQUEST"), "an unknown cache op is rejected, not ignored");
+        llb_string_free(bad);
+    }
+
     /* --- constrained output -------------------------------------------- */
     {
         const char* SCHEMA =

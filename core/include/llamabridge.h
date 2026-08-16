@@ -254,6 +254,36 @@ void llb_string_free(const char* s);
 const char* llb_count_tokens(llb_chat_t* chat, const char* request_json);
 
 /*
+ * Inspect or drop the engine's KV cache.
+ *
+ * ONE entry point with a JSON op, like llb_chat_lora — so a new operation
+ * costs no symbol and no binding change.
+ *
+ *   {"op":"status"}   report what is resident. Changes nothing.
+ *   {"op":"clear"}    drop it. Frees the KV memory and forgets the sequence.
+ *
+ * Both return:
+ *
+ *   { "type": "cache", "tokens": N, "n_ctx": M }
+ *
+ * where "tokens" is what is resident AFTER the operation — so a clear always
+ * reports 0, and a caller can assert on the result rather than trust it.
+ *
+ * WHY THIS EXISTS. Reuse is on by default and keyed on the longest common
+ * prefix, which is exactly right for a conversation that appends. It is
+ * exactly wrong when the handle moves to UNRELATED work: the old conversation
+ * keeps occupying context memory until something happens to evict it, and two
+ * tenants sharing a handle would share a cache. Passing "reuse_cache": false
+ * on the next inference also clears, but only as a side effect of doing work —
+ * that is no help when the point is to release memory NOW, or when you want to
+ * assert the cache is empty before handing the handle on.
+ *
+ * Returns a malloc'd JSON string — release it via llb_string_free. Never
+ * returns NULL; failures are error JSON.
+ */
+const char* llb_chat_cache(llb_chat_t* chat, const char* request_json);
+
+/*
  * Tear down an engine and release its model + context.
  * Safe to call on NULL.
  */

@@ -1537,6 +1537,52 @@ extern "C" const char* llb_count_tokens(llb_chat_t* chat, const char* request_js
     return out;
 }
 
+/* ------------------------------------------------------------------ */
+/* KV cache control                                                    */
+/*                                                                     */
+/* One entry point, JSON op dispatch — the llb_chat_lora pattern. The  */
+/* reported token count is always the state AFTER the operation, so a  */
+/* caller can assert rather than assume.                               */
+/* ------------------------------------------------------------------ */
+extern "C" const char* llb_chat_cache(llb_chat_t* chat, const char* request_json) {
+    if (!chat || chat->closed) {
+        return build_error("ENGINE_CLOSED", "chat engine is closed or NULL");
+    }
+
+    std::string op = "status";
+    if (request_json && *request_json) {
+        try {
+            json req = json::parse(request_json);
+            if (req.contains("op") && req["op"].is_string()) {
+                op = req["op"].get<std::string>();
+            }
+        } catch (const std::exception& e) {
+            return build_error("INVALID_REQUEST", std::string("malformed request JSON: ") + e.what());
+        }
+    }
+
+    if (op == "clear") {
+        llama_memory_t mem = llama_get_memory(chat->ctx);
+        if (mem) llama_memory_clear(mem, true);
+        /* The vector and the cache must agree exactly — a retained sequence
+           describing positions that are no longer there is precisely the bug
+           prefix reuse would then act on. */
+        chat->cached.clear();
+    } else if (op != "status") {
+        return build_error("INVALID_REQUEST",
+            "unknown cache op \"" + op + "\" — expected \"status\" or \"clear\"");
+    }
+
+    json resp;
+    resp["type"]   = "cache";
+    resp["tokens"] = (int)chat->cached.size();
+    resp["n_ctx"]  = (int)llama_n_ctx(chat->ctx);
+
+    const char* out = dup_cstr(resp.dump());
+    if (!out) return build_error("INTERNAL_BRIDGE_ERROR", "failed to build response");
+    return out;
+}
+
 extern "C" void llb_chat_destroy(llb_chat_t* chat) {
     if (!chat) return;
     chat->closed = true;
