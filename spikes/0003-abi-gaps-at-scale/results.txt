@@ -1,0 +1,72 @@
+.........................................................................
+model: /Users/muthuishere/.chatbot_models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+n_ctx: 8192   n_seq_max: 4
+
+== Q1  user-supplied JSON schema -> constrained output ==
+   baseline     Paris is the capital city of France. It has a population of approximately 2.2 million people. Paris was founded in 514 AD.
+   grammar produced by common_chat_templates_apply: 1342 bytes  lazy=0  triggers=0  preserved=2
+   chat format: peg-native
+   root rule: root ::= "<|im_start|>assistant\n" space space ("```json" space response-format space "```" | response-format)
+space ::= | " " | "\n"{1,2} [ \t]{0,20}
+string ::
+   generation_prompt: <|im_start|>assistant
+
+   CONSTRAINED  ```json
+{
+  "city": "Paris",
+  "population": 2, "founded": 256
+}
+```
+   fenced: YES (must be stripped by the core)
+   parses + matches schema exactly: YES
+   VERDICT Q1: YES — inputs.json_schema is all we need; the bridge simply never sets it.
+               TRAP: the grammar permits a ```json fence, so the core MUST parse
+               before returning, or callers get a string that is not JSON.
+
+== Q3  counting tokens for a message list ==
+   81 messages -> 2084 tokens
+   template apply: 4.56 ms   tokenize: 1.36 ms   total: 5.92 ms
+   n_ctx = 8192, so this prompt is 25% of the window
+   VERDICT Q3: YES, and it is cheap — counting needs the model's vocab + template, which only the core has. No context decode required.
+
+== Q2  KV prefix reuse across a growing agent conversation ==
+   turn  tok_total   clear_ms   reuse_ms     reused  speedup
+   1            45       25.1       24.1          0     1.0x
+   4           186       40.7       24.7        139     1.6x
+   8           374       54.7       25.1        327     2.2x
+   12          565      101.4       25.4        517     4.0x
+   16          757      121.5       26.1        709     4.7x
+   20          949      153.6       26.2        901     5.9x
+   24         1141      190.2       26.6       1093     7.2x
+   28         1333      217.9       26.9       1285     8.1x
+   32         1525      247.2       27.3       1477     9.0x
+
+   total prefill over 32 turns:  clear=4198 ms   reuse=829 ms   5.1x
+   final prompt: 1525 tokens
+   VERDICT Q2: YES — reuse is materially cheaper and the gap widens with conversation length.
+
+== Q4  stopping generation mid-flight, and cache integrity after ==
+   aborted after 12 tokens: One
+Two
+Three
+Four
+Five
+Six
+
+   cache now holds 54 positions (prompt 42 + 12 generated)
+   next request after abort (reused 24 of 38 prompt tokens): Paris
+   VERDICT Q4: YES — abort is a caller-side loop break; rolling the cache back leaves it usable.
+
+== Q5  N independent sequences in ONE context (the scaling shape) ==
+   n_seq_max = 4
+   slot 0: The number 3 is interesting because it often represents completeness o
+   slot 1: The number 10 is interesting because it is the sum of the first four p
+   slot 2: The number 17 is interesting because it is a prime number, meaning it 
+   slot 3: The number 24 is interesting because it is the smallest number that ca
+
+   4 slots x 24 tokens:  serial=642 ms (150 tok/s)   batched=305 ms (314 tok/s)   2.1x
+   VERDICT Q5: YES — one context holds N independent conversations, and batching them
+               into a single decode is where the throughput is. The scaling
+               shape is slots + per-slot logits index, available today.
+
+ALL VERDICTS POSITIVE
