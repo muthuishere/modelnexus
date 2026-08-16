@@ -84,6 +84,10 @@ transliteration.
       binding that quietly reshapes a result fails here while passing its own suite.
       C# is not in the harness (it needs a compiled project rather than a script); its own
       suite covers the same assertions.
+- [x] `task test` runs all of it — C ABI, four bindings, parity gate — with every model var
+      wired. **102 checks, ZERO skips**: C 16, Go 26, Python 18, JS 20, C# 22, plus AGREE.
+      The reranker and LoRA suites are no longer optional; `task models` reports what is
+      missing rather than letting a suite skip quietly.
 
 ## 6. Docs
 

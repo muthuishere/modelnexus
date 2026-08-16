@@ -130,14 +130,28 @@ tasks:
         done
 
   test:
-    desc: Build, then run every binding's tests
+    desc: Build, then run the C ABI suite, every binding, and the parity gate
     cmds:
       - task: models
       - task: build
+      - task: test:c
       - task: test:python
       - task: test:go
       - task: test:csharp
       - task: test:js
+      - task: test:agreement
+
+  test:c:
+    desc: The ABI itself — plain C, no language runtime, no test framework
+    cmds: ['./core/tests/run.sh']
+    env:
+      MODELNEXUS_MODEL: '{{.MODEL}}'
+
+  test:agreement:
+    desc: Parity gate — every binding must return byte-identical output (ADR-0002)
+    cmds: ['./core/tests/agreement.sh']
+    env:
+      MODELNEXUS_MODEL: '{{.MODEL}}'
 
   test:python:
     desc: Python binding (ctypes) smoke test
