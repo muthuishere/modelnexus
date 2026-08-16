@@ -50,6 +50,12 @@ typedef void (*llb_event_cb)(const char* event, void* user_data);
 /* llb_chat_infer_stream. The pointer is valid only for the duration   */
 /* of the callback. user_data is forwarded verbatim. May be NULL.      */
 /*                                                                     */
+/* LIFETIME — and this differs from llb_event_cb / llb_log_cb, which the  */
+/* core RETAINS. This callback is used ONLY for the duration of the      */
+/* llb_chat_infer_stream call that was given it, and is not stored. A    */
+/* binding may therefore hold its trampoline in a per-call local; it     */
+/* does NOT need to keep it alive for the life of the handle.            */
+/*                                                                       */
 /* RETURN VALUE (breaking change in 0.2.0 — was void):                 */
 /*   0        continue generating                                      */
 /*   non-zero STOP. Generation ends before the next token is decoded.  */
