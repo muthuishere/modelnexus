@@ -172,7 +172,7 @@ and may change. Branch on `code`, never on `message`.
 | code | when |
 |---|---|
 | `INVALID_REQUEST` | malformed request JSON, empty `messages`, bad generation parameter, both constraints set |
-| `BAD_REQUEST` | malformed JSON on the LoRA and embed calls: missing `op`, missing `id`, bad `input` |
+| `INVALID_REQUEST` | also covers the LoRA and embed calls: missing `op`, missing `id`, bad `input`. There used to be a second code, `BAD_REQUEST`, for exactly the same class of mistake, with no rule a reader could infer. There is one now. |
 | `ENGINE_NULL` | a null handle was passed |
 | `INFERENCE_FAILED` | generation aborted |
 | `INTERNAL_BRIDGE_ERROR` | template apply or response construction failed |
@@ -181,11 +181,17 @@ and may change. Branch on `code`, never on `message`.
 | `POOLING_NONE` | `llb_embed` on a handle created with `"pooling":"none"` |
 | `EMBED_FAILED` / `RERANK_FAILED` | the engine failed the operation |
 
-The `*_create` functions are the exception because there is no handle to attach a result to.
-They return NULL and deliver the reason through the event callback:
-`create_failure:tools_unsupported`, `:model_not_found`, `:load_model`, `:init_context`. A
-binding turns those into its own typed error — Go's `MODEL_NOT_TOOL_CAPABLE` and
-`MODEL_LOAD_FAILED` are synthesised there, not returned by the core.
+`llb_chat_create` and `llb_embed_create` return NULL, because there is no handle to
+attach a result to. The reason is not lost: **`llb_last_error()`** returns the same error
+JSON as everything else — `MODEL_NOT_FOUND`, `MODEL_LOAD_FAILED`, `MODEL_NOT_TOOL_CAPABLE`,
+`CHAT_TEMPLATE_FAILED`, `CONTEXT_INIT_FAILED`, `OUT_OF_MEMORY`, `INVALID_ARGUMENT`. It is
+thread-local, and a successful create clears it, so a stale reason can never read as a
+fresh one.
+
+Until 0.2.0 there was no such call, and every binding string-matched the `create_failure:…`
+event and **invented** codes the core never emitted. That is behaviour living in a binding,
+which is the one thing this ABI exists to prevent. The event callback still fires and is
+unchanged — it is the live progress channel; `llb_last_error` is the post-mortem.
 
 ## Callbacks, and their two different lifetimes
 

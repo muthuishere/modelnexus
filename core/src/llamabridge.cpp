@@ -120,6 +120,25 @@ static void emit(const struct llb_chat* chat, const char* msg) {
     }
 }
 
+/* The last create failure on THIS thread, as error JSON.
+
+   llb_chat_create / llb_embed_create are the one hole in "errors are data,
+   not NULL": there is no handle to hang a result on, so they return NULL and
+   describe the reason through the event callback. Every binding was therefore
+   string-matching an event and SYNTHESISING codes the core never emitted --
+   binding-side behaviour invention, which ADR-0002 forbids everywhere else.
+
+   Thread-local so two threads loading two models cannot overwrite each
+   other's reason. Set on every create-failure path, read by llb_last_error. */
+static thread_local std::string g_last_error;
+
+static void set_create_error(const char* code, const std::string& message) {
+    json e;
+    e["type"]  = "error";
+    e["error"] = { {"code", code}, {"message", message} };
+    g_last_error = e.dump();
+}
+
 static void emit_raw(llb_event_cb cb, void* user_data, const char* msg) {
     if (cb && msg) cb(msg, user_data);
 }
@@ -783,8 +802,10 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
                                        const char* config_json,
                                        llb_event_cb event_cb,
                                        void* user_data) {
+    g_last_error.clear();   // a stale reason must never read as a fresh one
     if (!gguf_path) {
         emit_raw(event_cb, user_data, "create_failure:null_path");
+        set_create_error("INVALID_ARGUMENT", "gguf_path is NULL");
         return nullptr;
     }
 
@@ -793,6 +814,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
         FILE* f = fopen(gguf_path, "rb");
         if (!f) {
             emit_raw(event_cb, user_data, "create_failure:model_not_found");
+        set_create_error("MODEL_NOT_FOUND", "no file at " + std::string(gguf_path));
             return nullptr;
         }
         fclose(f);
@@ -801,6 +823,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     llb_chat_t* chat = new (std::nothrow) llb_chat();
     if (!chat) {
         emit_raw(event_cb, user_data, "create_failure:oom");
+        set_create_error("OUT_OF_MEMORY", "could not allocate the engine");
         return nullptr;
     }
     chat->model_path = gguf_path;
@@ -819,6 +842,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     chat->model = llama_model_load_from_file(gguf_path, mparams);
     if (!chat->model) {
         emit(chat, "create_failure:load_model");
+        set_create_error("MODEL_LOAD_FAILED", "llama.cpp could not load " + std::string(gguf_path));
         delete chat;
         return nullptr;
     }
@@ -858,6 +882,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     chat->ctx = llama_init_from_model(chat->model, cparams);
     if (!chat->ctx) {
         emit(chat, "create_failure:init_context");
+        set_create_error("CONTEXT_INIT_FAILED", "could not create an inference context (n_ctx too large?)");
         llama_model_free(chat->model);
         delete chat;
         return nullptr;
@@ -869,6 +894,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
         chat->templates = common_chat_templates_init(chat->model, "");
     } catch (const std::exception& e) {
         emit(chat, "create_failure:chat_template");
+        set_create_error("CHAT_TEMPLATE_FAILED", "the GGUF has no usable chat template");
         llama_free(chat->ctx);
         llama_model_free(chat->model);
         delete chat;
@@ -876,6 +902,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     }
     if (!chat->templates) {
         emit(chat, "create_failure:chat_template");
+        set_create_error("CHAT_TEMPLATE_FAILED", "the GGUF has no usable chat template");
         llama_free(chat->ctx);
         llama_model_free(chat->model);
         delete chat;
@@ -889,6 +916,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
         tool_caps tc = compute_tool_caps(chat->model, chat->templates.get());
         if (!(tc.supports_tools && tc.supports_tool_calls)) {
             emit(chat, "create_failure:tools_unsupported");
+        set_create_error("MODEL_NOT_TOOL_CAPABLE", std::string(gguf_path) + " has a chat template that cannot describe or round-trip tool calls");
             chat->templates.reset();
             llama_free(chat->ctx);
             llama_model_free(chat->model);
@@ -1018,18 +1046,18 @@ static json lora_state(const llb_chat_t* chat) {
 extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json) {
     if (!chat)         return build_error("ENGINE_NULL", "chat handle is null");
     if (!chat->ctx)    return build_error("ENGINE_CLOSED", "engine has no context");
-    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+    if (!request_json) return build_error("INVALID_REQUEST", "request JSON is null");
 
     json req;
     try {
         req = json::parse(request_json);
     } catch (const std::exception& e) {
-        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + e.what());
+        return build_error("INVALID_REQUEST", std::string("could not parse request JSON: ") + e.what());
     }
 
     const std::string op = req.value("op", "");
     if (op.empty()) {
-        return build_error("BAD_REQUEST", "missing \"op\" (load|set|remove|clear|list)");
+        return build_error("INVALID_REQUEST", "missing \"op\" (load|set|remove|clear|list)");
     }
 
     json out;
@@ -1042,7 +1070,7 @@ extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json)
 
     if (op == "load") {
         const std::string path = req.value("path", "");
-        if (path.empty()) return build_error("BAD_REQUEST", "\"load\" requires a \"path\"");
+        if (path.empty()) return build_error("INVALID_REQUEST", "\"load\" requires a \"path\"");
 
         struct llama_adapter_lora* adapter = llama_adapter_lora_init(chat->model, path.c_str());
         if (!adapter) {
@@ -1071,7 +1099,7 @@ extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json)
     }
 
     if (op == "set") {
-        if (!req.contains("id")) return build_error("BAD_REQUEST", "\"set\" requires an \"id\"");
+        if (!req.contains("id")) return build_error("INVALID_REQUEST", "\"set\" requires an \"id\"");
         const int   id    = req.value("id", -1);
         const float scale = req.value("scale", 1.0f);
         bool found = false;
@@ -1088,7 +1116,7 @@ extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json)
     }
 
     if (op == "remove") {
-        if (!req.contains("id")) return build_error("BAD_REQUEST", "\"remove\" requires an \"id\"");
+        if (!req.contains("id")) return build_error("INVALID_REQUEST", "\"remove\" requires an \"id\"");
         const int id = req.value("id", -1);
         bool found = false;
         for (size_t i = 0; i < chat->loras.size(); ++i) {
@@ -1113,7 +1141,7 @@ extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json)
         return dup_cstr(out.dump());
     }
 
-    return build_error("BAD_REQUEST", "unknown op \"" + op + "\" (load|set|remove|clear|list)");
+    return build_error("INVALID_REQUEST", "unknown op \"" + op + "\" (load|set|remove|clear|list)");
 }
 
 /* ================================================================== */
@@ -1133,14 +1161,17 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
                                          const char* config_json,
                                          llb_event_cb event_cb,
                                          void* user_data) {
+    g_last_error.clear();   // a stale reason must never read as a fresh one
     if (!gguf_path) {
         emit_raw(event_cb, user_data, "create_failure:null_path");
+        set_create_error("INVALID_ARGUMENT", "gguf_path is NULL");
         return nullptr;
     }
     {
         FILE* f = fopen(gguf_path, "rb");
         if (!f) {
             emit_raw(event_cb, user_data, "create_failure:model_not_found");
+        set_create_error("MODEL_NOT_FOUND", "no file at " + std::string(gguf_path));
             return nullptr;
         }
         fclose(f);
@@ -1152,6 +1183,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
             cfg = json::parse(config_json);
         } catch (const std::exception&) {
             emit_raw(event_cb, user_data, "create_failure:bad_config");
+        set_create_error("INVALID_REQUEST", "config_json is not a JSON object");
             return nullptr;
         }
     }
@@ -1160,6 +1192,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     llb_embed_t* e = new (std::nothrow) struct llb_embed();
     if (!e) {
         emit_raw(event_cb, user_data, "create_failure:oom");
+        set_create_error("OUT_OF_MEMORY", "could not allocate the engine");
         return nullptr;
     }
     e->model_path = gguf_path;
@@ -1178,6 +1211,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     e->model = llama_model_load_from_file(gguf_path, mparams);
     if (!e->model) {
         emit_raw(event_cb, user_data, "create_failure:load_model");
+        set_create_error("MODEL_LOAD_FAILED", "llama.cpp could not load " + std::string(gguf_path));
         delete e;
         return nullptr;
     }
@@ -1198,6 +1232,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     e->ctx = llama_init_from_model(e->model, cparams);
     if (!e->ctx) {
         emit_raw(event_cb, user_data, "create_failure:init_context");
+        set_create_error("CONTEXT_INIT_FAILED", "could not create an inference context (n_ctx too large?)");
         llama_model_free(e->model);
         delete e;
         return nullptr;
@@ -1305,13 +1340,13 @@ static bool embed_all(llb_embed_t* e,
 extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
     if (!e)            return build_error("ENGINE_NULL", "embed handle is null");
     if (!e->ctx)       return build_error("ENGINE_CLOSED", "engine has no context");
-    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+    if (!request_json) return build_error("INVALID_REQUEST", "request JSON is null");
 
     json req;
     try {
         req = json::parse(request_json);
     } catch (const std::exception& ex) {
-        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + ex.what());
+        return build_error("INVALID_REQUEST", std::string("could not parse request JSON: ") + ex.what());
     }
 
     std::vector<std::string> inputs;
@@ -1321,7 +1356,7 @@ extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
         else if (in.is_array())  for (const auto& v : in) if (v.is_string()) inputs.push_back(v.get<std::string>());
     }
     if (inputs.empty()) {
-        return build_error("BAD_REQUEST", "\"input\" must be a string or a non-empty array of strings");
+        return build_error("INVALID_REQUEST", "\"input\" must be a string or a non-empty array of strings");
     }
 
     if (e->pooling == LLAMA_POOLING_TYPE_NONE) {
@@ -1369,7 +1404,7 @@ extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
 extern "C" const char* llb_rerank(llb_embed_t* e, const char* request_json) {
     if (!e)            return build_error("ENGINE_NULL", "embed handle is null");
     if (!e->ctx)       return build_error("ENGINE_CLOSED", "engine has no context");
-    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+    if (!request_json) return build_error("INVALID_REQUEST", "request JSON is null");
 
     if (e->pooling != LLAMA_POOLING_TYPE_RANK) {
         /* Refuse rather than return numbers that look like scores and are not:
@@ -1382,17 +1417,17 @@ extern "C" const char* llb_rerank(llb_embed_t* e, const char* request_json) {
     try {
         req = json::parse(request_json);
     } catch (const std::exception& ex) {
-        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + ex.what());
+        return build_error("INVALID_REQUEST", std::string("could not parse request JSON: ") + ex.what());
     }
 
     const std::string query = req.value("query", "");
-    if (query.empty()) return build_error("BAD_REQUEST", "\"query\" is required");
+    if (query.empty()) return build_error("INVALID_REQUEST", "\"query\" is required");
 
     std::vector<std::string> docs;
     if (req.contains("documents") && req["documents"].is_array()) {
         for (const auto& v : req["documents"]) if (v.is_string()) docs.push_back(v.get<std::string>());
     }
-    if (docs.empty()) return build_error("BAD_REQUEST", "\"documents\" must be a non-empty array of strings");
+    if (docs.empty()) return build_error("INVALID_REQUEST", "\"documents\" must be a non-empty array of strings");
 
     const struct llama_vocab* vocab = llama_model_get_vocab(e->model);
     const llama_token bos = llama_vocab_bos(vocab);
@@ -1462,6 +1497,16 @@ extern "C" void llb_embed_destroy(llb_embed_t* e) {
     if (e->ctx)   llama_free(e->ctx);
     if (e->model) llama_model_free(e->model);
     delete e;
+}
+
+/* Why the most recent create failed, on this thread, as error JSON.
+
+   Returns NULL when the last create on this thread succeeded, or when none
+   has run -- so a caller can distinguish "no failure" from "a failure with
+   no detail". */
+extern "C" const char* llb_last_error(void) {
+    if (g_last_error.empty()) return nullptr;
+    return dup_cstr(g_last_error);
 }
 
 extern "C" void llb_string_free(const char* s) {

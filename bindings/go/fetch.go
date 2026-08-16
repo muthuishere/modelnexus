@@ -17,6 +17,15 @@ import (
 // never tested with.
 const LlamaTag = "b9371"
 
+// BridgeVersion is the modelnexus C ABI this binding speaks.
+//
+// It is part of the cache path, and that is not cosmetic. The natives release is
+// keyed on the llama.cpp tag (ADR-0004), but the BRIDGE moves independently: 0.2.0
+// added entry points against the same llama.cpp b9371. Keyed on LlamaTag alone, a
+// user who fetched 0.1.0 natives would keep a cache that looks valid forever and
+// would never re-fetch — a new binding silently loading an old library.
+const BridgeVersion = "0.2.0"
+
 // nativesRepo is where the tier-1 workflow parks the per-platform native closure.
 const nativesRepo = "muthuishere/modelnexus"
 
@@ -31,7 +40,7 @@ func CacheDir() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("modelnexus: no user cache directory: %w", err)
 	}
-	return filepath.Join(base, "modelnexus", LlamaTag), nil
+	return filepath.Join(base, "modelnexus", LlamaTag+"-"+BridgeVersion), nil
 }
 
 // Fetch downloads this platform's native library into the cache, if it is not already
@@ -41,6 +50,14 @@ func CacheDir() (string, error) {
 // Go module is a source tree, and embedding five platforms' binaries would make every
 // `go get` pull ~70 MB of libraries the user will not use (ADR-0007). So the library
 // is fetched once, at the user's explicit request, rather than smuggled into the module.
+//
+// The returned directory is also searched automatically on the next Open, so the
+// usual shape is simply:
+//
+//	if _, err := modelnexus.Fetch(); err != nil { ... }
+//	chat, err := modelnexus.Open("model.gguf")
+//
+// You do not have to pass the path anywhere.
 //
 // Fetch is a convenience, not a requirement. Setting MODELNEXUS_LIB to a directory you
 // already have — an air-gapped machine, a vendored copy, a build from core/build.sh —

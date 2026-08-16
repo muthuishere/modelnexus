@@ -63,8 +63,45 @@ func libFilename() string {
 	}
 }
 
+// bindAll resolves every symbol this binding needs, converting purego's panic on a
+// missing symbol into an error. A missing symbol means the library on disk predates
+// this binding — the useful thing to say, rather than "dlsym: symbol not found".
+func bindAll(handle uintptr) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf(
+				"native library is missing a symbol this binding needs (%v) — it is "+
+					"older than modelnexus %s; delete the cache and call Fetch() again, "+
+					"or point MODELNEXUS_LIB at a current build", r, BridgeVersion)
+		}
+	}()
+	purego.RegisterLibFunc(&llbVersion, handle, "llb_version")
+	purego.RegisterLibFunc(&llbModelInfo, handle, "llb_model_info")
+	purego.RegisterLibFunc(&llbChatCreate, handle, "llb_chat_create")
+	purego.RegisterLibFunc(&llbChatInfer, handle, "llb_chat_infer")
+	purego.RegisterLibFunc(&llbChatStream, handle, "llb_chat_infer_stream")
+	purego.RegisterLibFunc(&llbCountTokens, handle, "llb_count_tokens")
+	purego.RegisterLibFunc(&llbChatCache, handle, "llb_chat_cache")
+	purego.RegisterLibFunc(&llbStringFree, handle, "llb_string_free")
+	purego.RegisterLibFunc(&llbChatDestroy, handle, "llb_chat_destroy")
+	purego.RegisterLibFunc(&llbChatLora, handle, "llb_chat_lora")
+	purego.RegisterLibFunc(&llbEmbedCreate, handle, "llb_embed_create")
+	purego.RegisterLibFunc(&llbEmbed, handle, "llb_embed")
+	purego.RegisterLibFunc(&llbRerank, handle, "llb_rerank")
+	purego.RegisterLibFunc(&llbEmbedDestroy, handle, "llb_embed_destroy")
+	purego.RegisterLibFunc(&llbSetLogLevel, handle, "llb_set_log_level")
+	purego.RegisterLibFunc(&llbSetLogCallback, handle, "llb_set_log_callback")
+	return nil
+}
+
 // candidates lists where to look, most explicit first: an explicit override, then
-// the repo's own build output for developers working in the tree.
+// the repo's own build output for developers working in the tree, then whatever
+// Fetch has already downloaded.
+//
+// The cache entry is what makes Fetch a whole feature rather than half of one.
+// Without it, Fetch downloads the library, returns the directory, and the very
+// next Open still fails -- the caller has to hand the path back through
+// MODELNEXUS_LIB, which no documentation could make feel like anything but a bug.
 func candidates() []string {
 	name := libFilename()
 	var out []string
@@ -90,6 +127,14 @@ func candidates() []string {
 			dir = parent
 		}
 	}
+
+	// Fetch's cache, last: an explicit override and a local build both win, so a
+	// developer working in the tree is never silently served a downloaded library
+	// instead of the one they just compiled.
+	if dir, err := CacheDir(); err == nil {
+		out = append(out, filepath.Join(dir, PlatformKey(), name))
+	}
+
 	return out
 }
 
@@ -140,22 +185,14 @@ func ensureLoaded() error {
 				lastErr = fmt.Errorf("%s: %w", path, err)
 				continue
 			}
-			purego.RegisterLibFunc(&llbVersion, handle, "llb_version")
-			purego.RegisterLibFunc(&llbModelInfo, handle, "llb_model_info")
-			purego.RegisterLibFunc(&llbChatCreate, handle, "llb_chat_create")
-			purego.RegisterLibFunc(&llbChatInfer, handle, "llb_chat_infer")
-			purego.RegisterLibFunc(&llbChatStream, handle, "llb_chat_infer_stream")
-			purego.RegisterLibFunc(&llbCountTokens, handle, "llb_count_tokens")
-			purego.RegisterLibFunc(&llbChatCache, handle, "llb_chat_cache")
-			purego.RegisterLibFunc(&llbStringFree, handle, "llb_string_free")
-			purego.RegisterLibFunc(&llbChatDestroy, handle, "llb_chat_destroy")
-			purego.RegisterLibFunc(&llbChatLora, handle, "llb_chat_lora")
-			purego.RegisterLibFunc(&llbEmbedCreate, handle, "llb_embed_create")
-			purego.RegisterLibFunc(&llbEmbed, handle, "llb_embed")
-			purego.RegisterLibFunc(&llbRerank, handle, "llb_rerank")
-			purego.RegisterLibFunc(&llbEmbedDestroy, handle, "llb_embed_destroy")
-			purego.RegisterLibFunc(&llbSetLogLevel, handle, "llb_set_log_level")
-			purego.RegisterLibFunc(&llbSetLogCallback, handle, "llb_set_log_callback")
+			// purego PANICS on a missing symbol. A native library that is present
+			// and loadable but OLDER than this binding is the likely cause, and a
+			// raw dlsym panic is a terrible way to learn that. Turn it into the
+			// typed error the caller can actually act on.
+			if err := bindAll(handle); err != nil {
+				lastErr = fmt.Errorf("%s: %w", path, err)
+				continue
+			}
 			return
 		}
 		loadErr = &ErrNativeLibraryNotFound{Searched: searched, Cause: lastErr}

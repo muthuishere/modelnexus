@@ -284,6 +284,34 @@ const char* llb_count_tokens(llb_chat_t* chat, const char* request_json);
 const char* llb_chat_cache(llb_chat_t* chat, const char* request_json);
 
 /*
+ * Why the most recent llb_chat_create / llb_embed_create failed, on THIS
+ * thread, as the same error JSON every other call returns:
+ *
+ *   { "type": "error", "error": { "code": "...", "message": "..." } }
+ *
+ * Returns NULL when the last create on this thread SUCCEEDED, or when none has
+ * run — so a caller can tell "no failure" from "a failure with no detail".
+ * When non-NULL, release it via llb_string_free.
+ *
+ * Codes: INVALID_ARGUMENT, MODEL_NOT_FOUND, MODEL_LOAD_FAILED,
+ *        MODEL_NOT_TOOL_CAPABLE, CHAT_TEMPLATE_FAILED, CONTEXT_INIT_FAILED,
+ *        OUT_OF_MEMORY, INVALID_REQUEST.
+ *
+ * WHY THIS EXISTS. The two create functions are the one hole in this ABI's
+ * "failures are data, never NULL" rule: there is no handle to hang a result
+ * on, so they return NULL and describe the reason through the event callback
+ * as a short string. Every binding was consequently string-matching those
+ * events and INVENTING error codes the core never emitted — which is exactly
+ * the behaviour-in-the-binding that this project forbids. Now the code is the
+ * core's, and a binding reports it rather than deciding it.
+ *
+ * Thread-local: two threads loading two models cannot overwrite each other's
+ * reason. The event callback still fires and is unchanged — it is the live
+ * progress channel; this is the post-mortem.
+ */
+const char* llb_last_error(void);
+
+/*
  * Tear down an engine and release its model + context.
  * Safe to call on NULL.
  */

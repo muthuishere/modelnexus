@@ -215,6 +215,26 @@ int main(void) {
         llb_string_free(r);
     }
 
+    /* --- create failures are DATA, not a string in an event ------------
+       The bindings used to string-match the event and invent their own codes.
+       That is behaviour living in a binding, which is the thing this ABI
+       exists to prevent. */
+    {
+        llb_chat_t* nope = llb_chat_create("/definitely/not/a/model.gguf", NULL, NULL, NULL);
+        ok(nope == NULL, "a missing model still returns NULL");
+        const char* why = llb_last_error();
+        ok(has(why, "MODEL_NOT_FOUND"), "and llb_last_error says why, with a stable code");
+        printf("        %s\n", why ? why : "(null)");
+        llb_string_free(why);
+
+        /* A successful create must clear it, or the next caller reads a stale
+           reason and reports a failure that did not happen. */
+        llb_chat_t* fine = llb_chat_create(model, NULL, NULL, NULL);
+        ok(fine != NULL, "a good model still loads");
+        ok(llb_last_error() == NULL, "a successful create clears the last error");
+        if (fine) llb_chat_destroy(fine);
+    }
+
     llb_chat_destroy(chat);
 
     printf("\n%d checks, %d failures\n", checks, failures);
