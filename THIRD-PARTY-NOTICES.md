@@ -23,6 +23,21 @@ llama.cpp vendors other libraries — cpp-httplib, miniaudio, stb, sheredom — 
 bridge includes none of them, and the CLI/server DLLs that would use them are explicitly
 excluded from `dist/` (`! -name "*-impl*"`). They are not redistributed.
 
+## Linked but not redistributed — system and toolchain libraries
+
+Our binaries reference these; they are resolved from the user's own machine and no copy of
+them is in any artifact we publish.
+
+| platform | referenced | note |
+|---|---|---|
+| Linux | `libgomp.so.1`, `libstdc++.so.6`, `libgcc_s.so.1`, `libc`, `libm` | GCC runtime. **`libgomp` is GPL-3 *with the GCC Runtime Library Exception***, which exists precisely to permit this; and we bundle none of them — verified, no `*gomp*` file in any archive. |
+| macOS | Accelerate, Metal, MetalKit, Foundation, CoreFoundation, `libc++`, `libSystem`, `libobjc` | Apple system frameworks, OS-provided. |
+| Windows | MSVC runtime | OS/redistributable-provided. |
+
+`libgomp` is the one worth naming explicitly, because "GPL" in a dependency list looks alarming
+until you check whether it is *bundled*. It is not: it is a dynamic `NEEDED` entry, and the
+Runtime Library Exception covers linking regardless.
+
 ## Dependencies resolved by the user's package manager — not redistributed
 
 We declare these; the user's toolchain fetches them from their own registry. Their

@@ -8,5 +8,10 @@
     <RootNamespace>Modelnexus</RootNamespace>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Declared even though this binding is not published: an assembly that carries
+         no licence metadata is ambiguous to anyone who receives a copy of it. -->
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Authors>Muthukumaran Navaneethakrishnan</Authors>
+    <Copyright>Copyright (c) 2026 Muthukumaran Navaneethakrishnan</Copyright>
   </PropertyGroup>
 </Project>
