@@ -226,6 +226,41 @@ export class Chat {
     return { tokens: r.tokens, nCtx: r.n_ctx };
   }
 
+  // ---- KV cache ----
+
+  _cache(op) {
+    this._open();
+    const r = check(takeString(this._lib.chatCache(this._handle, JSON.stringify({ op }))));
+    return { tokens: r.tokens, nCtx: r.n_ctx };
+  }
+
+  /**
+   * What the engine's KV cache currently holds. Changes nothing.
+   *
+   * @returns {{tokens: number, nCtx: number}}
+   */
+  cacheStatus() {
+    return this._cache('status');
+  }
+
+  /**
+   * Drop the KV cache, freeing its memory and forgetting the sequence. Returns the
+   * state AFTERWARDS -- always zero tokens, so a caller can assert the release
+   * happened rather than trust that it did.
+   *
+   * Prefix reuse is right for a conversation that appends and wrong when a chat moves
+   * to unrelated work: the old conversation keeps occupying context memory, and two
+   * tenants sharing a handle would share a cache. Passing `reuseCache: false` on the
+   * next inference also clears, but only as a side effect of doing work -- no help
+   * when the point is to release memory now, or to prove the cache is empty before
+   * handing the handle on.
+   *
+   * @returns {{tokens: number, nCtx: number}}
+   */
+  clearCache() {
+    return this._cache('clear');
+  }
+
   // ---- LoRA ----
 
   _lora(op) {

@@ -194,6 +194,32 @@ tasks:
       MODELNEXUS_LORA: '{{.LORA}}'
     cmds: ['npm install --silent', 'npm test --silent']
 
+  # ---------------------------------------------------------------- examples
+
+  examples:
+    desc: Run every example in every language (examples/) against the real models
+    cmds: ['./examples/run.sh all']
+    env: &example_env
+      MODELNEXUS_MODEL: '{{.MODEL}}'
+      MODELNEXUS_RERANKER: '{{.RERANKER}}'
+      MODELNEXUS_LORA_BASE: '{{.LORA_BASE}}'
+      MODELNEXUS_LORA: '{{.LORA}}'
+
+  examples:go:
+    desc: Run the Go examples only
+    cmds: ['./examples/run.sh go']
+    env: *example_env
+
+  examples:python:
+    desc: Run the Python examples only
+    cmds: ['./examples/run.sh python']
+    env: *example_env
+
+  examples:js:
+    desc: Run the JS examples only
+    cmds: ['./examples/run.sh js']
+    env: *example_env
+
   # ---------------------------------------------------------------- publishing
 
   publish:

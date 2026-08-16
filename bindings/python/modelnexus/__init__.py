@@ -312,6 +312,42 @@ class Chat:
             raise ModelError(err.get("code", "UNKNOWN"), err.get("message", ""))
         return result
 
+    # -- KV cache ----------------------------------------------------------
+
+    def _cache(self, op: str) -> dict[str, Any]:
+        self._check_open()
+        ptr = self._lib.llb_chat_cache(
+            ctypes.c_void_p(self._handle), json.dumps({"op": op}).encode("utf-8")
+        )
+        result = json.loads(take_string(self._lib, ptr) or "{}")
+        if result.get("type") == "error":
+            err = result.get("error") or {}
+            raise ModelError(err.get("code", "UNKNOWN"), err.get("message", ""))
+        return result
+
+    def cache_status(self) -> dict[str, Any]:
+        """What the engine's KV cache currently holds. Changes nothing.
+
+        Returns ``{"tokens": N, "n_ctx": M}`` -- both, because the number only means
+        something against the window it has to fit in.
+        """
+        return self._cache("status")
+
+    def clear_cache(self) -> dict[str, Any]:
+        """Drop the KV cache, freeing its memory and forgetting the sequence.
+
+        Returns the state *afterwards*, which is always ``{"tokens": 0, ...}``, so a
+        caller can assert the release happened rather than trust that it did.
+
+        Prefix reuse is right for a conversation that appends and wrong when a chat
+        moves to unrelated work: the old conversation keeps occupying context memory,
+        and two tenants sharing a handle would share a cache. Passing
+        ``reuse_cache=False`` on the next inference also clears, but only as a side
+        effect of doing work -- no help when the point is to release memory now, or to
+        prove the cache is empty before handing the handle on.
+        """
+        return self._cache("clear")
+
     # -- LoRA adapters -----------------------------------------------------
 
     def _lora(self, **op: Any) -> dict[str, Any]:

@@ -57,6 +57,15 @@ public sealed record TokenCount(
     [property: JsonPropertyName("tokens")] int Tokens,
     [property: JsonPropertyName("n_ctx")] int NCtx);
 
+/// <summary>What the engine's KV cache holds, and the window it holds it in.</summary>
+/// <remarks>
+/// <c>Tokens</c> is the state AFTER the operation that reported it, so a clear always
+/// reports zero and a caller can assert rather than assume.
+/// </remarks>
+public sealed record CacheState(
+    [property: JsonPropertyName("tokens")] int Tokens,
+    [property: JsonPropertyName("n_ctx")] int NCtx);
+
 /// <summary>One inference request, with every generation parameter the core accepts.</summary>
 /// <remarks>
 /// Every property is optional and unset properties are omitted from the JSON entirely,
@@ -379,6 +388,34 @@ public sealed class Chat : IDisposable
     /// <summary>Convenience overload for a plain message list.</summary>
     public TokenCount CountTokens(IEnumerable<Message> messages) =>
         CountTokens(new InferRequest { Messages = messages });
+
+    // ---- KV cache ----
+
+    private CacheState Cache(string op)
+    {
+        EnsureOpen();
+        var payload = JsonSerializer.Serialize(new { op }, Json.Options);
+        var doc = Json.Check(Native.TakeString(Native.ChatCache(_handle, payload)));
+        return doc.Deserialize<CacheState>(Json.Options)
+               ?? throw new ModelException("BAD_RESPONSE", "could not deserialize the cache state");
+    }
+
+    /// <summary>What the engine's KV cache currently holds. Changes nothing.</summary>
+    public CacheState CacheStatus() => Cache("status");
+
+    /// <summary>
+    /// Drop the KV cache, freeing its memory and forgetting the sequence. Returns the state
+    /// afterwards -- always zero tokens, so a caller can assert the release happened.
+    /// </summary>
+    /// <remarks>
+    /// Prefix reuse is right for a conversation that appends and wrong when a chat moves to
+    /// unrelated work: the old conversation keeps occupying context memory, and two tenants
+    /// sharing a handle would share a cache. Setting <c>ReuseCache = false</c> on the next
+    /// inference also clears, but only as a side effect of doing work -- no help when the
+    /// point is to release memory now, or to prove the cache is empty before handing the
+    /// handle on.
+    /// </remarks>
+    public CacheState ClearCache() => Cache("clear");
 
     // ---- LoRA ----
 

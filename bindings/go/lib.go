@@ -111,6 +111,7 @@ var (
 	llbChatInfer   func(chat uintptr, req string) unsafe.Pointer
 	llbChatStream  func(chat uintptr, req string, tokenCB uintptr, userData uintptr) unsafe.Pointer
 	llbCountTokens func(chat uintptr, req string) unsafe.Pointer
+	llbChatCache   func(chat uintptr, req string) unsafe.Pointer
 	llbStringFree  func(s unsafe.Pointer)
 	llbChatDestroy func(chat uintptr)
 
@@ -145,6 +146,7 @@ func ensureLoaded() error {
 			purego.RegisterLibFunc(&llbChatInfer, handle, "llb_chat_infer")
 			purego.RegisterLibFunc(&llbChatStream, handle, "llb_chat_infer_stream")
 			purego.RegisterLibFunc(&llbCountTokens, handle, "llb_count_tokens")
+			purego.RegisterLibFunc(&llbChatCache, handle, "llb_chat_cache")
 			purego.RegisterLibFunc(&llbStringFree, handle, "llb_string_free")
 			purego.RegisterLibFunc(&llbChatDestroy, handle, "llb_chat_destroy")
 			purego.RegisterLibFunc(&llbChatLora, handle, "llb_chat_lora")

@@ -269,6 +269,41 @@ def test_schema_and_grammar_together_is_rejected(chat):
     assert excinfo.value.code == "INVALID_REQUEST"
 
 
+def test_cache_status_and_clear(chat):
+    # The assertion that matters is that the clear is OBSERVABLE. A clear that
+    # silently did nothing would still return a well-formed response, and the next
+    # inference would still be correct -- just slow, and still holding the previous
+    # tenant's conversation. So: infer, see a non-zero cache, clear, see zero, then
+    # infer again and prove the handle still works.
+    chat.infer(CAPITAL, max_tokens=16, seed=42, temperature=0.0)
+
+    before = chat.cache_status()
+    assert before["type"] == "cache"
+    assert before["tokens"] > 0
+    assert before["n_ctx"] >= before["tokens"]
+
+    # Status is the non-destructive call -- the binding's stand-in for the ABI's
+    # "a NULL request reads status, it does not clear". Reading twice must not empty
+    # the cache; getting that backwards would make an innocent-looking call wipe a
+    # conversation.
+    assert chat.cache_status()["tokens"] == before["tokens"]
+
+    assert chat.clear_cache()["tokens"] == 0
+    assert chat.cache_status()["tokens"] == 0, "the clear did not persist"
+
+    after = chat.infer(CAPITAL, max_tokens=16, seed=42, temperature=0.0)
+    assert "Paris" in after["text"]
+
+
+def test_cache_on_a_closed_chat_is_rejected():
+    c = mx.Chat(model())
+    c.close()
+    for call in (c.cache_status, c.clear_cache):
+        with pytest.raises(mx.ModelError) as excinfo:
+            call()
+        assert excinfo.value.code == "ENGINE_CLOSED"
+
+
 def lora_pair() -> tuple[str, str]:
     """A base model and a LoRA adapter built for it, or skip.
 

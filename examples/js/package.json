@@ -1,0 +1,10 @@
+{
+  "name": "modelnexus-examples",
+  "private": true,
+  "type": "module",
+  "description": "Runnable modelnexus examples. Run them with node <file>.js after npm install.",
+  "comment": "The dependency is a file: link to the binding in this tree, so a change to the binding breaks these examples in the same commit. A consumer outside the repo writes \"@muthuishere/modelnexus\": \"^0.1.0\" instead.",
+  "dependencies": {
+    "@muthuishere/modelnexus": "file:../../bindings/js"
+  }
+}

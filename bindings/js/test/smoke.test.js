@@ -249,6 +249,42 @@ describe('inference control', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' 
     }
   });
 
+  test('clearCache is observable, and the engine still works after it', () => {
+    // The assertion that matters is that the clear is OBSERVABLE. A clear that
+    // silently did nothing would still return a well-formed object, and the next
+    // inference would still be correct -- just slow, and still holding the previous
+    // tenant's conversation.
+    const chat = new Chat(MODEL);
+    try {
+      chat.infer(ASK_PARIS);
+
+      const before = chat.cacheStatus();
+      assert.ok(before.tokens > 0, 'the cache is not empty after an inference');
+      assert.ok(before.nCtx >= before.tokens);
+
+      // Status is the non-destructive call -- the binding's stand-in for the ABI's
+      // "a NULL request reads status, it does not clear". Reading twice must not
+      // empty the cache; backwards, an innocent-looking call would wipe a
+      // conversation.
+      assert.equal(chat.cacheStatus().tokens, before.tokens);
+
+      assert.equal(chat.clearCache().tokens, 0, 'clear empties the cache, and says so');
+      assert.equal(chat.cacheStatus().tokens, 0, 'the clear persisted');
+
+      assert.match(chat.infer(ASK_PARIS).text, /Paris/);
+    } finally {
+      chat.close();
+    }
+  });
+
+  test('cache calls on a closed chat are a typed error', () => {
+    const chat = new Chat(MODEL);
+    chat.close();
+    for (const call of [() => chat.cacheStatus(), () => chat.clearCache()]) {
+      assert.throws(call, (e) => e instanceof ModelError && e.code === 'ENGINE_CLOSED');
+    }
+  });
+
   test('a schema and a grammar together is rejected, not silently resolved', () => {
     const chat = new Chat(MODEL);
     try {

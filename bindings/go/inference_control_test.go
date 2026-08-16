@@ -332,3 +332,92 @@ func TestSchemaAndGrammarTogetherIsAnError(t *testing.T) {
 		t.Errorf("code = %q, want INVALID_REQUEST", me.Code)
 	}
 }
+
+func TestCacheStatusAndClear(t *testing.T) {
+	// The assertion that matters is that the clear is OBSERVABLE. A clear that
+	// silently did nothing would still return a well-formed CacheState, and the next
+	// inference would still be correct -- just slow, and still holding the previous
+	// tenant's conversation. So: infer, see a non-zero cache, clear, see zero, then
+	// infer again and prove the handle still works.
+	chat := openChat(t)
+	req := deterministic("Name the capital of France in one word.", 16)
+
+	if _, err := chat.Infer(req); err != nil {
+		t.Fatalf("Infer: %v", err)
+	}
+
+	before, err := chat.CacheStatus()
+	if err != nil {
+		t.Fatalf("CacheStatus: %v", err)
+	}
+	if before.Tokens <= 0 {
+		t.Fatalf("tokens = %d after an inference, want a non-empty cache", before.Tokens)
+	}
+	if before.NCtx <= 0 {
+		t.Errorf("n_ctx = %d, want the engine's context window", before.NCtx)
+	}
+
+	// Status is the non-destructive call -- the binding's stand-in for the ABI's
+	// "a NULL request reads status, it does not clear". Asking twice must not empty
+	// the cache; getting that backwards would make an innocent-looking call wipe a
+	// conversation.
+	again, err := chat.CacheStatus()
+	if err != nil {
+		t.Fatalf("CacheStatus (second): %v", err)
+	}
+	if again.Tokens != before.Tokens {
+		t.Errorf("reading the status changed it: %d then %d", before.Tokens, again.Tokens)
+	}
+
+	cleared, err := chat.ClearCache()
+	if err != nil {
+		t.Fatalf("ClearCache: %v", err)
+	}
+	if cleared.Tokens != 0 {
+		t.Errorf("tokens = %d after a clear, want 0", cleared.Tokens)
+	}
+
+	after, err := chat.CacheStatus()
+	if err != nil {
+		t.Fatalf("CacheStatus (after clear): %v", err)
+	}
+	if after.Tokens != 0 {
+		t.Errorf("the clear did not persist: status reports %d tokens", after.Tokens)
+	}
+
+	resp, err := chat.Infer(req)
+	if err != nil {
+		t.Fatalf("Infer after ClearCache: %v", err)
+	}
+	if !strings.Contains(resp.Text, "Paris") {
+		t.Errorf("the engine stopped working after a clear: %q", resp.Text)
+	}
+}
+
+func TestCacheOnAClosedChatIsATypedError(t *testing.T) {
+	chat, err := modelnexus.Open(model(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	chat.Close()
+
+	for _, tc := range []struct {
+		name string
+		call func() (modelnexus.CacheState, error)
+	}{
+		{"CacheStatus", chat.CacheStatus},
+		{"ClearCache", chat.ClearCache},
+	} {
+		_, err := tc.call()
+		if err == nil {
+			t.Fatalf("%s on a closed Chat returned no error", tc.name)
+		}
+		var me *modelnexus.Error
+		if !errorsAs(err, &me) {
+			t.Fatalf("%s error is %T, want *modelnexus.Error", tc.name, err)
+		}
+		if me.Code != "ENGINE_CLOSED" {
+			t.Errorf("%s code = %q, want ENGINE_CLOSED", tc.name, me.Code)
+		}
+	}
+}

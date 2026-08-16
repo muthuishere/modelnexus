@@ -125,6 +125,7 @@ export function lib() {
       chatInferStream: native.func(
         'void *llb_chat_infer_stream(void *chat, const char *request, TokenCallback *cb, void *user)',
       ),
+      chatCache: native.func('void *llb_chat_cache(void *chat, const char *request)'),
       chatLora: native.func('void *llb_chat_lora(void *chat, const char *request)'),
       chatDestroy: native.func('void llb_chat_destroy(void *chat)'),
       embedCreate: native.func(

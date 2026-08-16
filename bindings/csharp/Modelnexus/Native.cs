@@ -118,6 +118,9 @@ internal static partial class Native
     [DllImport(Lib, EntryPoint = "llb_count_tokens", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr CountTokens(IntPtr chat, [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson);
 
+    [DllImport(Lib, EntryPoint = "llb_chat_cache", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ChatCache(IntPtr chat, [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson);
+
     [DllImport(Lib, EntryPoint = "llb_chat_lora", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ChatLora(IntPtr chat, [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson);
 

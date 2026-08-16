@@ -283,6 +283,50 @@ public class BindingTests
     }
 
     [SkippableFact]
+    public void ClearCacheIsObservableAndTheEngineStillWorksAfterIt()
+    {
+        // The assertion that matters is that the clear is OBSERVABLE. A clear that
+        // silently did nothing would still return a well-formed CacheState, and the next
+        // inference would still be correct -- just slow, and still holding the previous
+        // tenant's conversation.
+        Skip.IfNoModel();
+        using var chat = new Chat(Model!);
+
+        var ask = new InferRequest
+        {
+            Messages = new[] { new Message("user", "Name the capital of France in one word.") },
+            MaxTokens = 16,
+            Seed = 42,
+            Temperature = 0.0
+        };
+        chat.Infer(ask);
+
+        var before = chat.CacheStatus();
+        Assert.True(before.Tokens > 0, $"the cache is not empty after an inference, got {before.Tokens}");
+        Assert.True(before.NCtx >= before.Tokens);
+
+        // Status is the non-destructive call -- this binding's stand-in for the ABI's
+        // "a NULL request reads status, it does not clear". Reading twice must not empty
+        // the cache; backwards, an innocent-looking call would wipe a conversation.
+        Assert.Equal(before.Tokens, chat.CacheStatus().Tokens);
+
+        Assert.Equal(0, chat.ClearCache().Tokens);
+        Assert.Equal(0, chat.CacheStatus().Tokens);   // the clear persisted
+
+        Assert.Contains("Paris", chat.Infer(ask).Text);
+    }
+
+    [SkippableFact]
+    public void CacheCallsAfterDisposeAreRejected()
+    {
+        Skip.IfNoModel();
+        var chat = new Chat(Model!);
+        chat.Dispose();
+        Assert.Equal("ENGINE_CLOSED", Assert.Throws<ModelException>(() => chat.CacheStatus()).Code);
+        Assert.Equal("ENGINE_CLOSED", Assert.Throws<ModelException>(() => chat.ClearCache()).Code);
+    }
+
+    [SkippableFact]
     public void UseAfterDisposeIsRejected()
     {
         Skip.IfNoModel();

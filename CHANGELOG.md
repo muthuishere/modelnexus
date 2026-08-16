@@ -37,6 +37,14 @@ tells people to depend on the current shape.
   tokenizes — no inference, no context, ~6 ms for an 80-message conversation. It lives in the
   core because counting needs the model's vocabulary *and* its chat template, and no binding has
   either.
+- **KV cache control.** Two calls — a status read and a clear — tell you how many tokens the
+  engine is holding against its context window, and let you drop them. Cache reuse is right for a
+  conversation that appends and wrong the moment a handle moves to unrelated work: the previous
+  conversation keeps occupying context memory, and two tenants sharing a handle would share a
+  cache. `reuse_cache: false` on the next request also clears, but only as a side effect of doing
+  work, which is no help when you need the memory back now or need to prove the handle is empty
+  before passing it on. The clear returns the state after it ran — always zero tokens — so you can
+  assert the release happened instead of trusting it did. The status read changes nothing.
 - **Cancelled generations return a result, not an error.** A cancelled call still gives you a
   complete response with the text produced so far, honest token counts, and
   `"finish_reason": "cancelled"`. You were charged for that work; you should get to see it.
@@ -65,6 +73,12 @@ Each is the language's own idiom, not a transliteration — same behaviour, nati
 A callback that returns nothing (`None`, `undefined`) **continues** — only an explicit false
 stops. In Python and C# a callback that throws stops generation and the exception is re-raised
 after the native call unwinds, rather than crossing the C frame.
+
+Cache control is two methods everywhere, named the way each language names things: Go
+`CacheStatus` / `ClearCache`, Python `cache_status` / `clear_cache`, JS `cacheStatus` /
+`clearCache`, C# `CacheStatus` / `ClearCache`. Both return the same pair — resident tokens and
+the context window — because a token count only means something against the window it must fit
+in.
 
 **C# source-breaking**: the stream callback is `Func<string, bool>`; an `Action<string>` no
 longer fits. No overload was kept, because the two would be ambiguous on an explicit `null` and

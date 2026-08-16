@@ -140,6 +140,9 @@ def _bind_signatures(lib: ctypes.CDLL) -> None:
     lib.llb_count_tokens.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     lib.llb_count_tokens.restype = ctypes.c_void_p
 
+    lib.llb_chat_cache.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.llb_chat_cache.restype = ctypes.c_void_p
+
     lib.llb_chat_infer_stream.argtypes = [
         ctypes.c_void_p,
         ctypes.c_char_p,

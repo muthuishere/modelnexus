@@ -137,6 +137,15 @@ type TokenCount struct {
 	NCtx int `json:"n_ctx"`
 }
 
+// CacheState is what the engine's KV cache holds, and the window it holds it in.
+type CacheState struct {
+	// Tokens is how much of the cache is resident, AFTER the operation that reported
+	// it -- so a clear always reports 0, and a caller can assert rather than assume.
+	Tokens int `json:"tokens"`
+	// NCtx is the engine's context window, so a caller can compare the two.
+	NCtx int `json:"n_ctx"`
+}
+
 // ModelInfo reports a model's tool-calling capability.
 type ModelInfo struct {
 	SupportsTools      bool   `json:"supports_tools"`
@@ -492,6 +501,52 @@ func (c *Chat) CountTokens(req Request) (TokenCount, error) {
 		return TokenCount{}, &Error{Code: "UNKNOWN", Message: "core reported an error with no detail"}
 	}
 	return res.TokenCount, nil
+}
+
+// cache runs one KV-cache op and decodes the {"type":"cache"} reply.
+func (c *Chat) cache(op map[string]any) (CacheState, error) {
+	if c.handle == 0 {
+		return CacheState{}, &Error{Code: "ENGINE_CLOSED", Message: "this Chat has already been closed"}
+	}
+	payload, err := json.Marshal(op)
+	if err != nil {
+		return CacheState{}, fmt.Errorf("modelnexus: could not encode cache request: %w", err)
+	}
+	raw := takeString(llbChatCache(c.handle, string(payload)))
+
+	var res struct {
+		Type string `json:"type"`
+		CacheState
+		Error *Error `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return CacheState{}, fmt.Errorf("modelnexus: unparseable cache response: %w", err)
+	}
+	if res.Type == "error" {
+		if res.Error != nil {
+			return CacheState{}, res.Error
+		}
+		return CacheState{}, &Error{Code: "UNKNOWN", Message: "core reported an error with no detail"}
+	}
+	return res.CacheState, nil
+}
+
+// CacheStatus reports what the engine's KV cache currently holds. It changes nothing.
+func (c *Chat) CacheStatus() (CacheState, error) {
+	return c.cache(map[string]any{"op": "status"})
+}
+
+// ClearCache drops the KV cache, freeing its memory and forgetting the sequence, and
+// returns the state afterwards -- which is always zero tokens, so a caller can assert
+// the release happened rather than trust that it did.
+//
+// Prefix reuse is right for a conversation that appends and wrong when a Chat moves to
+// unrelated work: the old conversation keeps occupying context memory, and two tenants
+// sharing a handle would share a cache. Passing ReuseCacheOff() on the next inference
+// also clears, but only as a side effect of doing work -- no help when the point is to
+// release memory now, or to prove the cache is empty before handing the handle on.
+func (c *Chat) ClearCache() (CacheState, error) {
+	return c.cache(map[string]any{"op": "clear"})
 }
 
 // Close releases the model and its context. Safe to call more than once.
