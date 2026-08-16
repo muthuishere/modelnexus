@@ -104,19 +104,28 @@ export function lib() {
     }
 
     const StringCallback = koffi.proto('void StringCallback(const char *text, void *user)');
+    // The token callback returns int, not void: non-zero stops generation (0.2.0).
+    // It is a separate proto from StringCallback for exactly that reason -- declaring
+    // it void would silently discard whatever the JS handler returned.
+    const TokenCallback = koffi.proto('int TokenCallback(const char *text, void *user)');
     const LogCallback = koffi.proto('void LogCallback(int level, const char *text, void *user)');
 
     bound = {
       koffi,
       StringCallback,
+      TokenCallback,
       LogCallback,
       version: native.func('const char *llb_version()'),
       modelInfo: native.func('void *llb_model_info(const char *path)'),
-      chatCreate: native.func('void *llb_chat_create(const char *path, StringCallback *cb, void *user)'),
-      chatInfer: native.func('void *llb_chat_infer(void *chat, const char *request)'),
-      chatInferStream: native.func(
-        'void *llb_chat_infer_stream(void *chat, const char *request, StringCallback *cb, void *user)',
+      chatCreate: native.func(
+        'void *llb_chat_create(const char *path, const char *config, StringCallback *cb, void *user)',
       ),
+      chatInfer: native.func('void *llb_chat_infer(void *chat, const char *request)'),
+      countTokens: native.func('void *llb_count_tokens(void *chat, const char *request)'),
+      chatInferStream: native.func(
+        'void *llb_chat_infer_stream(void *chat, const char *request, TokenCallback *cb, void *user)',
+      ),
+      chatCache: native.func('void *llb_chat_cache(void *chat, const char *request)'),
       chatLora: native.func('void *llb_chat_lora(void *chat, const char *request)'),
       chatDestroy: native.func('void llb_chat_destroy(void *chat)'),
       embedCreate: native.func(

@@ -78,3 +78,22 @@ jobs:
       - name: C# binding
         working-directory: bindings/csharp
         run: dotnet test Modelnexus.Tests/Modelnexus.Tests.csproj -v q --nologo
+
+      # The examples need weights, and CI has none, so every one of them SKIPS here and
+      # the run exits 0. What this step does prove is that they compile, vet, resolve
+      # the binding in this tree, and that run.sh itself works — the parts that rot
+      # without anyone noticing. run.sh prints exactly what it skipped and why, and says
+      # "NOTHING RAN" when nothing did, so a green tick here cannot be mistaken for the
+      # examples having been executed.
+      #
+      # Compiling them is a separate step because run.sh would not reach a Go compile
+      # error it never runs.
+      - name: Examples compile
+        run: |
+          cd examples/go && CGO_ENABLED=0 go vet ./... && CGO_ENABLED=0 go build ./...
+          cd ../python && python -m compileall -q .
+          cd ../js && npm install --silent --no-audit --no-fund
+          for f in *.js; do node --check "$f"; done
+
+      - name: Examples run (skips without models)
+        run: ./examples/run.sh all

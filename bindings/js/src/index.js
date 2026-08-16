@@ -13,6 +13,7 @@
 
 import koffi from 'koffi';
 import { lib, takeString, platformKey, NativeLibraryNotFoundError } from './lib.js';
+import { toWire, fromWire } from './wire.js';
 
 export { platformKey, NativeLibraryNotFoundError };
 
@@ -92,17 +93,32 @@ export function version() {
   return lib().version();
 }
 
-/** Inspect a GGUF's tool-calling capability without loading an engine. */
+/**
+ * Inspect a GGUF's tool-calling capability without loading an engine.
+ *
+ * @returns {{supportsTools: boolean, supportsToolCalls: boolean,
+ *            hasToolUseTemplate: boolean, chatFormat: string|null, error: string|null}}
+ */
 export function modelInfo(ggufPath) {
   const l = lib();
-  return JSON.parse(takeString(l.modelInfo(ggufPath)) || '{}');
+  return fromWire(JSON.parse(takeString(l.modelInfo(ggufPath)) || '{}'));
+}
+
+/** Marshal a request and drop it on the wire, converting the answer back. */
+function serialize(request) {
+  // An absent option is absent on the wire: `undefined` survives toWire and
+  // JSON.stringify drops it. That matters most for `reuseCache`, whose core default
+  // is true -- writing `reuse_cache: false` for an unset option would turn the cache
+  // off for every caller who never mentioned it.
+  return JSON.stringify(toWire(request ?? {}));
 }
 
 /** A loaded model and its inference context. Call `close()` when done. */
 export class Chat {
   /**
    * @param {string} ggufPath
-   * @param {{onEvent?: (event: string) => void}} [options]
+   * @param {{nCtx?: number, nBatch?: number, nSeqMax?: number,
+   *          onEvent?: (event: string) => void}} [options]
    */
   constructor(ggufPath, options = {}) {
     this._lib = lib();
@@ -119,7 +135,16 @@ export class Chat {
       options.onEvent?.(value);
     }, koffi.pointer(this._lib.StringCallback));
 
-    const handle = this._lib.chatCreate(ggufPath, this._eventCb, null);
+    // A null config is not the same as `{}`: the core reads NULL as "every default",
+    // which is what this constructor did before the parameter existed. Callers who
+    // pass no sizing option must land on that path byte for byte.
+    const config = {};
+    if (options.nCtx !== undefined) config.nCtx = options.nCtx;
+    if (options.nBatch !== undefined) config.nBatch = options.nBatch;
+    if (options.nSeqMax !== undefined) config.nSeqMax = options.nSeqMax;
+    const configJson = Object.keys(config).length ? serialize(config) : null;
+
+    const handle = this._lib.chatCreate(ggufPath, configJson, this._eventCb, null);
     if (!handle) {
       koffi.unregister(this._eventCb);
       // NULL is the one place the core signals failure with a null pointer; the
@@ -140,23 +165,44 @@ export class Chat {
   /**
    * Run one turn.
    *
-   * Generation parameters (temperature, top_k, top_p, min_p, max_tokens,
-   * repeat_penalty, seed, stop) go inside `request`, so new ones need no change here.
+   * Generation parameters (temperature, topK, topP, minP, maxTokens, repeatPenalty,
+   * seed, stop) go inside `request`, so new ones need no change here: the boundary
+   * converts camelCase to the core's snake_case whether or not this binding has
+   * heard of the key.
+   *
+   * Constrained output: `jsonSchema` (an object) guarantees the reply parses as JSON
+   * and satisfies the schema, or `grammar` (raw GBNF). Supplying both is an
+   * INVALID_REQUEST error from the core rather than a precedence rule.
+   *
+   * `reuseCache: false` makes the call provably independent of the ones before it.
+   * The default -- reuse -- is a latency property only; output is identical.
+   *
+   * Returning `false` from `onToken` stops generation. That is not an error: the
+   * response comes back complete, with the text produced so far and
+   * `finishReason: 'cancelled'`.
    *
    * @param {object} request
-   * @param {(piece: string) => void} [onToken] pass to stream; the full response still returns
+   * @param {(piece: string) => boolean|void} [onToken] pass to stream; the full response still returns
+   * @returns {{type: string, text: string, toolCalls: object[], finishReason: string,
+   *            usage: {promptTokens: number, completionTokens: number, totalTokens: number}}}
    */
   infer(request, onToken) {
     this._open();
-    const payload = JSON.stringify(request);
+    const payload = serialize(request);
 
     if (!onToken) {
-      return check(takeString(this._lib.chatInfer(this._handle, payload)));
+      return fromWire(check(takeString(this._lib.chatInfer(this._handle, payload))));
     }
 
-    const cb = koffi.register((text) => onToken(text ?? ''), koffi.pointer(this._lib.StringCallback));
+    // Only an explicit `false` cancels. The usual callback -- one that writes a piece
+    // and returns nothing -- yields undefined, and treating that falsy value as "stop"
+    // would cancel every stream after its first token.
+    const cb = koffi.register(
+      (text) => (onToken(text ?? '') === false ? 1 : 0),
+      koffi.pointer(this._lib.TokenCallback),
+    );
     try {
-      return check(takeString(this._lib.chatInferStream(this._handle, payload, cb, null)));
+      return fromWire(check(takeString(this._lib.chatInferStream(this._handle, payload, cb, null))));
     } finally {
       // The token callback is only needed for the duration of the call, unlike the
       // event callback -- release it rather than leaking a trampoline per inference.
@@ -164,11 +210,62 @@ export class Chat {
     }
   }
 
+  /**
+   * How many tokens a request's messages will occupy, and the context window they
+   * have to fit in. Decodes nothing and does not disturb the KV cache.
+   *
+   * Lives in the core rather than here because counting needs the model's vocabulary
+   * AND its parsed chat template, and a binding holds neither.
+   *
+   * @param {object} request the same `messages` (and optional `tools`) shape as infer
+   * @returns {{tokens: number, nCtx: number}}
+   */
+  countTokens(request) {
+    this._open();
+    const r = fromWire(check(takeString(this._lib.countTokens(this._handle, serialize(request)))));
+    return { tokens: r.tokens, nCtx: r.nCtx };
+  }
+
+  // ---- KV cache ----
+
+  _cache(op) {
+    this._open();
+    const r = fromWire(check(takeString(this._lib.chatCache(this._handle, serialize({ op })))));
+    return { tokens: r.tokens, nCtx: r.nCtx };
+  }
+
+  /**
+   * What the engine's KV cache currently holds. Changes nothing.
+   *
+   * @returns {{tokens: number, nCtx: number}}
+   */
+  cacheStatus() {
+    return this._cache('status');
+  }
+
+  /**
+   * Drop the KV cache, freeing its memory and forgetting the sequence. Returns the
+   * state AFTERWARDS -- always zero tokens, so a caller can assert the release
+   * happened rather than trust that it did.
+   *
+   * Prefix reuse is right for a conversation that appends and wrong when a chat moves
+   * to unrelated work: the old conversation keeps occupying context memory, and two
+   * tenants sharing a handle would share a cache. Passing `reuseCache: false` on the
+   * next inference also clears, but only as a side effect of doing work -- no help
+   * when the point is to release memory now, or to prove the cache is empty before
+   * handing the handle on.
+   *
+   * @returns {{tokens: number, nCtx: number}}
+   */
+  clearCache() {
+    return this._cache('clear');
+  }
+
   // ---- LoRA ----
 
   _lora(op) {
     this._open();
-    return check(takeString(this._lib.chatLora(this._handle, JSON.stringify(op))));
+    return fromWire(check(takeString(this._lib.chatLora(this._handle, serialize(op)))));
   }
 
   /**
@@ -234,11 +331,16 @@ export class Embedder {
       options.onEvent?.(value);
     }, koffi.pointer(this._lib.StringCallback));
 
-    const config = { n_batch: options.nBatch ?? 512 };
-    if (options.pooling) config.pooling = options.pooling;
-    if (options.nCtx) config.n_ctx = options.nCtx;
+    // Only what the caller set, exactly as Chat does above. A binding that restates a
+    // default -- this one used to send n_batch: 512 unasked -- pins the old value the
+    // day the core moves its own, and does it silently. The core owns every default.
+    const config = {};
+    if (options.pooling !== undefined) config.pooling = options.pooling;
+    if (options.nCtx !== undefined) config.nCtx = options.nCtx;
+    if (options.nBatch !== undefined) config.nBatch = options.nBatch;
+    const configJson = Object.keys(config).length ? serialize(config) : null;
 
-    const handle = this._lib.embedCreate(ggufPath, JSON.stringify(config), this._eventCb, null);
+    const handle = this._lib.embedCreate(ggufPath, configJson, this._eventCb, null);
     if (!handle) {
       koffi.unregister(this._eventCb);
       const detail = this._events.join('; ') || 'unknown reason';
@@ -259,8 +361,8 @@ export class Embedder {
   embed(texts, { normalize = true } = {}) {
     this._open();
     const input = Array.isArray(texts) ? texts : [texts];
-    const payload = JSON.stringify({ input, normalize });
-    return check(takeString(this._lib.embed(this._handle, payload))).embeddings ?? [];
+    const payload = serialize({ input, normalize });
+    return fromWire(check(takeString(this._lib.embed(this._handle, payload)))).embeddings ?? [];
   }
 
   /**
@@ -269,12 +371,14 @@ export class Embedder {
    * Each hit carries the document's ORIGINAL index, because results come back
    * reordered. Scores are raw model logits: comparable within one call, not across
    * models, and not probabilities. Requires pooling 'rank'.
+   *
+   * @returns {{index: number, score: number}[]}
    */
   rerank(query, documents, { topN } = {}) {
     this._open();
     const request = { query, documents };
-    if (topN > 0) request.top_n = topN;
-    return check(takeString(this._lib.rerank(this._handle, JSON.stringify(request)))).results ?? [];
+    if (topN > 0) request.topN = topN;
+    return fromWire(check(takeString(this._lib.rerank(this._handle, serialize(request))))).results ?? [];
   }
 
   /** Release the model and its context. Idempotent. */

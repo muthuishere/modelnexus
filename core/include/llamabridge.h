@@ -49,9 +49,33 @@ typedef void (*llb_event_cb)(const char* event, void* user_data);
 /* Invoked once per decoded token piece (NUL-terminated UTF-8) during  */
 /* llb_chat_infer_stream. The pointer is valid only for the duration   */
 /* of the callback. user_data is forwarded verbatim. May be NULL.      */
+/*                                                                     */
+/* LIFETIME — and this differs from llb_event_cb / llb_log_cb, which the  */
+/* core RETAINS. This callback is used ONLY for the duration of the      */
+/* llb_chat_infer_stream call that was given it, and is not stored. A    */
+/* binding may therefore hold its trampoline in a per-call local; it     */
+/* does NOT need to keep it alive for the life of the handle.            */
+/*                                                                       */
+/* RETURN VALUE (breaking change in 0.2.0 — was void):                 */
+/*   0        continue generating                                      */
+/*   non-zero STOP. Generation ends before the next token is decoded.  */
+/*                                                                     */
+/* A callback MUST NOT let a host-language exception escape into the     */
+/* core. The bridge is C++ with its own unwinding, and a managed or      */
+/* interpreted exception crossing this frame is undefined behaviour.     */
+/* Catch it, return non-zero to stop, and re-raise after the call        */
+/* returns — the cancellation path is exactly the mechanism for this.    */
+/*                                                                       */
+/* Cancelling is a RESULT, not an error: the call still returns a       */
+/* complete response carrying the text produced so far, honest usage    */
+/* counts, and "finish_reason": "cancelled".                           */
+/*                                                                     */
+/* The KV cache is rolled back to the prompt boundary on cancellation,  */
+/* so the abandoned partial turn can never be matched as a reusable     */
+/* prefix by a later call (see llb_chat_create's "reuse_cache").        */
 /* ------------------------------------------------------------------ */
 
-typedef void (*llb_token_cb)(const char* token_piece, void* user_data);
+typedef int (*llb_token_cb)(const char* token_piece, void* user_data);
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
@@ -67,7 +91,24 @@ typedef void (*llb_token_cb)(const char* token_piece, void* user_data);
  * `supports_tools` is false, the bridge frees everything, emits the event
  * "create_failure:tools_unsupported" via event_cb, and returns NULL.
  *
+ * Configuration (breaking change in 0.2.0 — this parameter is new).
+ * config_json is an optional JSON object; NULL or "" means defaults, which
+ * are exactly the values this function used before the parameter existed.
+ * Mirrors llb_embed_create's shape.
+ *
+ *   {
+ *     "n_ctx":     N,   // context size            (default 4096)
+ *     "n_batch":   N,   // logical batch size      (default 512)
+ *     "n_seq_max": N    // max concurrent sequences (default 1)
+ *   }
+ *
+ * n_seq_max has no observable effect today. It is accepted now because it is
+ * a CREATE-TIME context parameter — the one thing that cannot be added later
+ * through request JSON — and reserving it is what lets multi-sequence "slots"
+ * be added without a future ABI break.
+ *
  * @param gguf_path   Path to the .gguf model file.
+ * @param config_json Optional JSON config (NULL => defaults).
  * @param event_cb    Optional progress callback (NULL to disable).
  * @param user_data   Opaque pointer passed back to event_cb.
  * @return            Engine handle, or NULL on any failure
@@ -77,6 +118,7 @@ typedef void (*llb_token_cb)(const char* token_piece, void* user_data);
  *                    event).
  */
 llb_chat_t* llb_chat_create(const char* gguf_path,
+                            const char* config_json,
                             llb_event_cb event_cb,
                             void* user_data);
 
@@ -122,8 +164,31 @@ const char* llb_model_info(const char* gguf_path);
  *     "max_tokens":    N,     // default 256
  *     "repeat_penalty":R,     // default 1.0 (disabled)
  *     "seed":          S,     // default random (LLAMA_DEFAULT_SEED)
- *     "stop":          [ "...", ... ]   // optional stop strings
+ *     "stop":          [ "...", ... ], // optional stop strings
+ *
+ *     // --- constrained output (0.2.0). At most ONE of these two. -------
+ *     "json_schema":   {...},  // JSON Schema; output is constrained to it
+ *     "grammar":       "...",  // raw GBNF; output is constrained to it
+ *
+ *     // --- KV cache (0.2.0) --------------------------------------------
+ *     "reuse_cache":   bool    // default TRUE
  *   }
+ *
+ * CONSTRAINED OUTPUT. Supplying both "json_schema" and "grammar" is an error
+ * (INVALID_REQUEST), not a precedence rule. With "json_schema" the returned
+ * content is guaranteed to PARSE as JSON and satisfy the schema: the grammar
+ * llama.cpp generates deliberately permits a ```json markdown fence, so the
+ * bridge strips it before returning rather than handing callers a "JSON"
+ * string that json.loads() rejects.
+ *
+ * CACHE REUSE. By default the engine keeps the tokens resident in its KV
+ * cache between calls and re-decodes only the part of a new prompt that
+ * differs — the longest common prefix is reused. An appending conversation
+ * therefore costs a flat amount per turn instead of growing linearly, which
+ * over a session is the difference between linear and quadratic total work.
+ * Output is unaffected; this is purely latency. Set "reuse_cache": false when
+ * each call must be provably independent (determinism harnesses, tenants
+ * sharing one handle).
  *
  * Response JSON shape (success):
  *   {
@@ -166,6 +231,85 @@ const char* llb_chat_infer_stream(llb_chat_t* chat, const char* request_json,
  * llb_chat_infer_stream. Safe to call on NULL.
  */
 void llb_string_free(const char* s);
+
+/*
+ * Count the tokens a message list will occupy, WITHOUT running inference.
+ *
+ * Applies the model's chat template and tokenizes the result. Creates no
+ * context, decodes nothing, and does not touch the KV cache — calling this
+ * between two inferences cannot disturb cache reuse.
+ *
+ * Accepts the same "messages" (and optional "tools") shape as llb_chat_infer;
+ * every generation parameter is ignored if present.
+ *
+ * Returns a malloc'd JSON string — release it via llb_string_free. Never
+ * returns NULL; failures are error JSON.
+ *
+ *   { "type": "token_count", "tokens": N, "n_ctx": M }
+ *
+ * This lives in the ABI rather than in each binding because counting needs
+ * BOTH the model's vocabulary and its parsed chat template, and a binding
+ * holds neither.
+ */
+const char* llb_count_tokens(llb_chat_t* chat, const char* request_json);
+
+/*
+ * Inspect or drop the engine's KV cache.
+ *
+ * ONE entry point with a JSON op, like llb_chat_lora — so a new operation
+ * costs no symbol and no binding change.
+ *
+ *   {"op":"status"}   report what is resident. Changes nothing.
+ *   {"op":"clear"}    drop it. Frees the KV memory and forgets the sequence.
+ *
+ * Both return:
+ *
+ *   { "type": "cache", "tokens": N, "n_ctx": M }
+ *
+ * where "tokens" is what is resident AFTER the operation — so a clear always
+ * reports 0, and a caller can assert on the result rather than trust it.
+ *
+ * WHY THIS EXISTS. Reuse is on by default and keyed on the longest common
+ * prefix, which is exactly right for a conversation that appends. It is
+ * exactly wrong when the handle moves to UNRELATED work: the old conversation
+ * keeps occupying context memory until something happens to evict it, and two
+ * tenants sharing a handle would share a cache. Passing "reuse_cache": false
+ * on the next inference also clears, but only as a side effect of doing work —
+ * that is no help when the point is to release memory NOW, or when you want to
+ * assert the cache is empty before handing the handle on.
+ *
+ * Returns a malloc'd JSON string — release it via llb_string_free. Never
+ * returns NULL; failures are error JSON.
+ */
+const char* llb_chat_cache(llb_chat_t* chat, const char* request_json);
+
+/*
+ * Why the most recent llb_chat_create / llb_embed_create failed, on THIS
+ * thread, as the same error JSON every other call returns:
+ *
+ *   { "type": "error", "error": { "code": "...", "message": "..." } }
+ *
+ * Returns NULL when the last create on this thread SUCCEEDED, or when none has
+ * run — so a caller can tell "no failure" from "a failure with no detail".
+ * When non-NULL, release it via llb_string_free.
+ *
+ * Codes: INVALID_ARGUMENT, MODEL_NOT_FOUND, MODEL_LOAD_FAILED,
+ *        MODEL_NOT_TOOL_CAPABLE, CHAT_TEMPLATE_FAILED, CONTEXT_INIT_FAILED,
+ *        OUT_OF_MEMORY, INVALID_REQUEST.
+ *
+ * WHY THIS EXISTS. The two create functions are the one hole in this ABI's
+ * "failures are data, never NULL" rule: there is no handle to hang a result
+ * on, so they return NULL and describe the reason through the event callback
+ * as a short string. Every binding was consequently string-matching those
+ * events and INVENTING error codes the core never emitted — which is exactly
+ * the behaviour-in-the-binding that this project forbids. Now the code is the
+ * core's, and a binding reports it rather than deciding it.
+ *
+ * Thread-local: two threads loading two models cannot overwrite each other's
+ * reason. The event callback still fires and is unchanged — it is the live
+ * progress channel; this is the post-mortem.
+ */
+const char* llb_last_error(void);
 
 /*
  * Tear down an engine and release its model + context.

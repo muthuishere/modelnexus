@@ -40,7 +40,87 @@ public sealed record Response(
     [property: JsonPropertyName("text")] string Text,
     [property: JsonPropertyName("tool_calls")] IReadOnlyList<ToolCall>? ToolCalls,
     [property: JsonPropertyName("finish_reason")] string? FinishReason,
-    [property: JsonPropertyName("usage")] Usage? Usage);
+    [property: JsonPropertyName("usage")] Usage? Usage)
+{
+    /// <summary>True when generation was stopped early rather than finishing.</summary>
+    /// <remarks>
+    /// A cancelled generation is a normal, complete response carrying the text produced
+    /// so far and honest usage counts -- never an exception. This property exists so
+    /// that contract is checkable without a magic string at every call site.
+    /// </remarks>
+    [JsonIgnore]
+    public bool IsCancelled => FinishReason == "cancelled";
+}
+
+/// <summary>How many tokens a message list occupies, and the window it must fit in.</summary>
+public sealed record TokenCount(
+    [property: JsonPropertyName("tokens")] int Tokens,
+    [property: JsonPropertyName("n_ctx")] int NCtx);
+
+/// <summary>What the engine's KV cache holds, and the window it holds it in.</summary>
+/// <remarks>
+/// <c>Tokens</c> is the state AFTER the operation that reported it, so a clear always
+/// reports zero and a caller can assert rather than assume.
+/// </remarks>
+public sealed record CacheState(
+    [property: JsonPropertyName("tokens")] int Tokens,
+    [property: JsonPropertyName("n_ctx")] int NCtx);
+
+/// <summary>One inference request, with every generation parameter the core accepts.</summary>
+/// <remarks>
+/// Every property is optional and unset properties are omitted from the JSON entirely,
+/// so the core's own defaults are what apply -- a binding that materialised them here
+/// would freeze today's values into five languages.
+/// <see cref="Chat.Infer(object, Func{string, bool}?, CancellationToken)"/> also accepts
+/// any other object, so a parameter the core gains before this type does is still reachable.
+/// </remarks>
+public sealed record InferRequest
+{
+    [JsonPropertyName("messages")] public required IEnumerable<Message> Messages { get; init; }
+
+    /// <summary>OpenAI-shaped function declarations. modelnexus never executes them.</summary>
+    [JsonPropertyName("tools")] public IEnumerable<object>? Tools { get; init; }
+
+    /// <summary>"auto", "none" or "required".</summary>
+    [JsonPropertyName("tool_choice")] public string? ToolChoice { get; init; }
+
+    [JsonPropertyName("temperature")] public double? Temperature { get; init; }
+    [JsonPropertyName("top_k")] public int? TopK { get; init; }
+    [JsonPropertyName("top_p")] public double? TopP { get; init; }
+    [JsonPropertyName("min_p")] public double? MinP { get; init; }
+    [JsonPropertyName("max_tokens")] public int? MaxTokens { get; init; }
+    [JsonPropertyName("repeat_penalty")] public double? RepeatPenalty { get; init; }
+    [JsonPropertyName("seed")] public uint? Seed { get; init; }
+    [JsonPropertyName("stop")] public IEnumerable<string>? Stop { get; init; }
+
+    /// <summary>
+    /// A JSON Schema the output must satisfy -- an anonymous object, a
+    /// <see cref="JsonElement"/>, or anything else serializable to a JSON object.
+    /// </summary>
+    /// <remarks>
+    /// The returned text is guaranteed to parse: upstream's generated grammar permits a
+    /// ```json markdown fence, and the core strips it before returning. Setting this
+    /// together with <see cref="Grammar"/> is an INVALID_REQUEST error, not a precedence
+    /// rule -- a silent winner between two output constraints is a debugging session
+    /// nobody should have.
+    /// </remarks>
+    [JsonPropertyName("json_schema")] public object? JsonSchema { get; init; }
+
+    /// <summary>Raw GBNF the output must satisfy. Mutually exclusive with <see cref="JsonSchema"/>.</summary>
+    [JsonPropertyName("grammar")] public string? Grammar { get; init; }
+
+    /// <summary>
+    /// Whether the engine may reuse the KV cache prefix it already holds. Unset means the
+    /// key is not sent at all, so the core's default (reuse) applies.
+    /// </summary>
+    /// <remarks>
+    /// Reuse is purely a latency property -- output is identical either way -- and it turns
+    /// an appending conversation's total prefill from quadratic into linear. Set it false
+    /// only when each call must be provably independent: a determinism harness, or tenants
+    /// sharing one handle.
+    /// </remarks>
+    [JsonPropertyName("reuse_cache")] public bool? ReuseCache { get; init; }
+}
 
 /// <summary>One LoRA adapter applied to a chat context.</summary>
 public sealed record Adapter(
@@ -168,8 +248,21 @@ public sealed class Chat : IDisposable
     /// <remarks>
     /// Models whose chat template cannot do tool calling are rejected here rather
     /// than silently degraded.
+    /// <para>
+    /// <paramref name="nCtx"/>, <paramref name="nBatch"/> and <paramref name="nSeqMax"/>
+    /// are fixed when the context is built and cannot be changed per request, which is why
+    /// they live here while every generation parameter lives on <see cref="Infer(object, Func{string, bool}?, CancellationToken)"/>.
+    /// Leaving them unset sends no config at all, so the core's defaults are reached by
+    /// exactly the path they were before this parameter existed.
+    /// </para>
+    /// <para>
+    /// <paramref name="nSeqMax"/> is reserved and has no observable effect today. It is
+    /// accepted now because create-time parameters are the only ones that cannot be added
+    /// later through request JSON without breaking the ABI.
+    /// </para>
     /// </remarks>
-    public Chat(string ggufPath, Action<string>? onEvent = null)
+    public Chat(string ggufPath, int? nCtx = null, int? nBatch = null, int? nSeqMax = null,
+                Action<string>? onEvent = null)
     {
         _eventCallback = (ptr, _) =>
         {
@@ -178,7 +271,13 @@ public sealed class Chat : IDisposable
             onEvent?.Invoke(text);
         };
 
-        _handle = Native.ChatCreate(ggufPath, _eventCallback, IntPtr.Zero);
+        var config = new Dictionary<string, object?>();
+        if (nCtx is not null) config["n_ctx"] = nCtx;
+        if (nBatch is not null) config["n_batch"] = nBatch;
+        if (nSeqMax is not null) config["n_seq_max"] = nSeqMax;
+        var configJson = config.Count > 0 ? JsonSerializer.Serialize(config, Json.Options) : null;
+
+        _handle = Native.ChatCreate(ggufPath, configJson, _eventCallback, IntPtr.Zero);
         if (_handle == IntPtr.Zero)
         {
             // NULL is the one place the core signals failure with a null pointer;
@@ -202,24 +301,60 @@ public sealed class Chat : IDisposable
     /// The request object. Generation parameters travel inside it, so new ones need
     /// no change to this method.
     /// </param>
-    /// <param name="onToken">Pass a handler to stream; the full response still returns.</param>
-    public Response Infer(object request, Action<string>? onToken = null)
+    /// <param name="onToken">
+    /// Pass a handler to stream; the full response still returns. Return <c>true</c> to keep
+    /// generating, <c>false</c> to stop after the piece just delivered.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// Signalling it stops generation at the next token boundary, exactly as returning
+    /// <c>false</c> from <paramref name="onToken"/> does.
+    /// </param>
+    /// <returns>
+    /// The response. A stopped generation returns NORMALLY with
+    /// <see cref="Response.IsCancelled"/> true and the text produced so far -- it does NOT
+    /// throw <see cref="OperationCanceledException"/>.
+    /// </returns>
+    /// <remarks>
+    /// That return-don't-throw choice is deliberate, and it is the one place this binding
+    /// departs from .NET convention. The core treats cancellation as a <i>result</i>: a
+    /// complete response with honest usage counts, because the tokens were really generated
+    /// and really cost something. Throwing would discard both the partial text and the bill
+    /// for it, and would make a <see cref="CancellationToken"/> behave differently from an
+    /// <paramref name="onToken"/> returning false, which is the same mechanism underneath.
+    /// Callers who want the exception can still write
+    /// <c>cancellationToken.ThrowIfCancellationRequested()</c> on the result.
+    /// </remarks>
+    public Response Infer(object request, Func<string, bool>? onToken = null,
+                          CancellationToken cancellationToken = default)
     {
         EnsureOpen();
         var payload = JsonSerializer.Serialize(request, Json.Options);
 
         string raw;
-        if (onToken is null)
+        if (onToken is null && !cancellationToken.CanBeCanceled)
         {
             raw = Native.TakeString(Native.ChatInfer(_handle, payload));
         }
         else
         {
+            // An exception thrown out of a managed callback and through a native frame is
+            // undefined behaviour, so it is caught, turned into a stop, and rethrown once
+            // the native call has unwound normally.
+            Exception? escaped = null;
+
             // Only needs to survive the call, but keeping a local reference is what
             // guarantees that -- the GC does not know native code holds it.
-            Native.StringCallback cb = (ptr, _) => onToken(Native.BorrowString(ptr));
+            Native.TokenCallback cb = (ptr, _) =>
+            {
+                if (cancellationToken.IsCancellationRequested) return 1;
+                if (onToken is null) return 0;
+                try { return onToken(Native.BorrowString(ptr)) ? 0 : 1; }
+                catch (Exception e) { escaped = e; return 1; }
+            };
             raw = Native.TakeString(Native.ChatInferStream(_handle, payload, cb, IntPtr.Zero));
             GC.KeepAlive(cb);
+
+            if (escaped is not null) throw escaped;
         }
 
         var doc = Json.Check(raw);
@@ -229,16 +364,58 @@ public sealed class Chat : IDisposable
 
     /// <summary>Convenience overload for a plain message list.</summary>
     public Response Infer(IEnumerable<Message> messages, int? maxTokens = null, uint? seed = null,
-                          Action<string>? onToken = null)
+                          Func<string, bool>? onToken = null,
+                          CancellationToken cancellationToken = default) =>
+        Infer(new InferRequest { Messages = messages, MaxTokens = maxTokens, Seed = seed },
+              onToken, cancellationToken);
+
+    /// <summary>Count the tokens a request occupies, without generating anything.</summary>
+    /// <remarks>
+    /// Applies the chat template and tokenizes; it creates no context, decodes nothing, and
+    /// does not touch the KV cache, so calling it between two inferences cannot disturb
+    /// prefix reuse. It lives in the ABI rather than here because counting needs BOTH the
+    /// model's vocabulary and its parsed chat template, and a binding holds neither.
+    /// </remarks>
+    public TokenCount CountTokens(object request)
     {
-        var request = new Dictionary<string, object?>
-        {
-            ["messages"] = messages,
-            ["max_tokens"] = maxTokens,
-            ["seed"] = seed
-        };
-        return Infer(request, onToken);
+        EnsureOpen();
+        var payload = JsonSerializer.Serialize(request, Json.Options);
+        var doc = Json.Check(Native.TakeString(Native.CountTokens(_handle, payload)));
+        return doc.Deserialize<TokenCount>(Json.Options)
+               ?? throw new ModelException("BAD_RESPONSE", "could not deserialize the token count");
     }
+
+    /// <summary>Convenience overload for a plain message list.</summary>
+    public TokenCount CountTokens(IEnumerable<Message> messages) =>
+        CountTokens(new InferRequest { Messages = messages });
+
+    // ---- KV cache ----
+
+    private CacheState Cache(string op)
+    {
+        EnsureOpen();
+        var payload = JsonSerializer.Serialize(new { op }, Json.Options);
+        var doc = Json.Check(Native.TakeString(Native.ChatCache(_handle, payload)));
+        return doc.Deserialize<CacheState>(Json.Options)
+               ?? throw new ModelException("BAD_RESPONSE", "could not deserialize the cache state");
+    }
+
+    /// <summary>What the engine's KV cache currently holds. Changes nothing.</summary>
+    public CacheState CacheStatus() => Cache("status");
+
+    /// <summary>
+    /// Drop the KV cache, freeing its memory and forgetting the sequence. Returns the state
+    /// afterwards -- always zero tokens, so a caller can assert the release happened.
+    /// </summary>
+    /// <remarks>
+    /// Prefix reuse is right for a conversation that appends and wrong when a chat moves to
+    /// unrelated work: the old conversation keeps occupying context memory, and two tenants
+    /// sharing a handle would share a cache. Setting <c>ReuseCache = false</c> on the next
+    /// inference also clears, but only as a side effect of doing work -- no help when the
+    /// point is to release memory now, or to prove the cache is empty before handing the
+    /// handle on.
+    /// </remarks>
+    public CacheState ClearCache() => Cache("clear");
 
     // ---- LoRA ----
 
@@ -295,8 +472,22 @@ public sealed class Embedder : IDisposable
     private readonly List<string> _events = new();
     private readonly Native.StringCallback _eventCallback;
 
+    /// <summary>Load a GGUF model for embedding or reranking.</summary>
+    /// <param name="ggufPath">Path to the GGUF model.</param>
+    /// <param name="pooling">
+    /// How token vectors are reduced to one vector per input. <see cref="Pooling.Rank"/>
+    /// is required for <see cref="Rerank"/>; <see cref="Pooling.Default"/> leaves the
+    /// choice to the model.
+    /// </param>
+    /// <param name="nCtx">Context size; 0 leaves it to the core's default.</param>
+    /// <param name="nBatch">
+    /// Caps how many tokens one input may have; 0 leaves it to the core's default.
+    /// The binding states no number of its own -- a default restated here is a second
+    /// place it can drift from.
+    /// </param>
+    /// <param name="onEvent">Receives the core's lifecycle events during load.</param>
     public Embedder(string ggufPath, Pooling pooling = Pooling.Default,
-                    int nCtx = 0, int nBatch = 512, Action<string>? onEvent = null)
+                    int nCtx = 0, int nBatch = 0, Action<string>? onEvent = null)
     {
         _eventCallback = (ptr, _) =>
         {
@@ -305,12 +496,14 @@ public sealed class Embedder : IDisposable
             onEvent?.Invoke(text);
         };
 
-        var config = new Dictionary<string, object?> { ["n_batch"] = nBatch };
+        var config = new Dictionary<string, object?>();
         if (pooling != Pooling.Default) config["pooling"] = pooling.ToString().ToLowerInvariant();
         if (nCtx > 0) config["n_ctx"] = nCtx;
+        if (nBatch > 0) config["n_batch"] = nBatch;
+        // Nothing set means NULL, not "{}" -- same rule as Chat above.
+        var configJson = config.Count > 0 ? JsonSerializer.Serialize(config, Json.Options) : null;
 
-        _handle = Native.EmbedCreate(ggufPath, JsonSerializer.Serialize(config, Json.Options),
-                                     _eventCallback, IntPtr.Zero);
+        _handle = Native.EmbedCreate(ggufPath, configJson, _eventCallback, IntPtr.Zero);
         if (_handle == IntPtr.Zero)
         {
             var detail = _events.Count > 0 ? string.Join("; ", _events) : "unknown reason";

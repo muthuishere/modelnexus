@@ -1,0 +1,235 @@
+---
+title: The C ABI
+description: Fifteen entry points, opaque handles, JSON in and JSON out. The contract every binding implements.
+---
+
+Fifteen exported symbols. Opaque handles, JSON in, JSON out, `malloc`'d UTF-8 the caller
+frees. `core/include/llamabridge.h` is the normative copy; this page is the reading of it.
+
+If you are binding a sixth language, this is the whole job.
+
+## The sixteen
+
+### Lifecycle
+
+| symbol | signature | what it does |
+|---|---|---|
+| `llb_chat_create` | `llb_chat_t*(const char* gguf_path, const char* config_json, llb_event_cb, void*)` | loads a GGUF and builds a generation context. **Returns NULL on failure** |
+| `llb_chat_destroy` | `void(llb_chat_t*)` | frees model + context. NULL-safe |
+| `llb_embed_create` | `llb_embed_t*(const char* gguf_path, const char* config_json, llb_event_cb, void*)` | loads a model for embedding or reranking. **Returns NULL on failure** |
+| `llb_embed_destroy` | `void(llb_embed_t*)` | frees model + context. NULL-safe |
+| `llb_string_free` | `void(const char*)` | releases any string this ABI returned. NULL-safe |
+
+`config_json` may be NULL or `""`, which means every default — and it must mean *exactly*
+the same thing as before the parameter existed. Chat takes `{"n_ctx":4096, "n_batch":512,
+"n_seq_max":1}`; embed takes `{"pooling":"mean|cls|last|rank|none", "n_ctx":512,
+"n_batch":512}`.
+
+`n_seq_max` has no observable effect today. It is reserved because it is a **create-time**
+parameter — the one kind that cannot arrive later inside request JSON.
+
+`llb_chat_create` enforces a policy: a model whose chat template cannot do tool calling is
+rejected. The reason arrives as the event `create_failure:tools_unsupported` and the return
+is NULL. `llb_embed_create` has no such gate — an embedding model has no chat template.
+
+### Inference
+
+| symbol | signature |
+|---|---|
+| `llb_chat_infer` | `const char*(llb_chat_t*, const char* request_json)` |
+| `llb_chat_infer_stream` | `const char*(llb_chat_t*, const char* request_json, llb_token_cb, void*)` |
+| `llb_count_tokens` | `const char*(llb_chat_t*, const char* request_json)` |
+
+Both infer calls take the same request and return the same response. Streaming is not a
+different code path with a different result — it is the same call with a callback attached,
+and it still returns the complete response JSON at the end.
+
+`llb_count_tokens` applies the chat template and tokenises. No context, no decode, no KV
+cache mutation, so it is safe between two inferences. It lives here rather than in each
+binding because counting needs the model's **vocabulary and its parsed chat template**, and
+a binding holds neither. That is the test for whether something belongs in the ABI.
+
+### KV cache
+
+| symbol | signature |
+|---|---|
+| `llb_chat_cache` | `const char*(llb_chat_t*, const char* request_json)` |
+
+One entry point, a JSON op — the `llb_chat_lora` pattern, so a future operation costs no
+symbol and no binding change.
+
+```c
+llb_chat_cache(chat, "{\"op\":\"status\"}");  /* {"type":"cache","tokens":38,"n_ctx":4096} */
+llb_chat_cache(chat, "{\"op\":\"clear\"}");   /* {"type":"cache","tokens":0,"n_ctx":4096}  */
+```
+
+Three details are deliberate:
+
+- **Both ops report the state *after* the operation.** A clear always returns `0`, so a
+  caller can assert rather than assume.
+- **A NULL or empty request means `status`, not `clear`.** The other default would make an
+  innocent-looking call destroy a conversation.
+- **An unknown op is an error**, not a no-op.
+
+Reuse is on by default and keyed on the longest common prefix, which is right for a
+conversation that appends and wrong the moment a handle moves to unrelated work — the old
+conversation keeps occupying context memory, and two tenants sharing a handle would share a
+cache. `"reuse_cache": false` on the next inference also clears, but only as a side effect
+of doing work; that is no help when the point is to release memory now.
+
+Request JSON, all optional except `messages`:
+
+```json
+{
+  "messages": [{"role": "user", "content": "..."}],
+  "tools": [{"type": "function", "function": {"name": "...", "parameters": {}}}],
+  "tool_choice": "auto",
+  "temperature": 0.7, "top_k": 40, "top_p": 0.95, "min_p": 0.05,
+  "max_tokens": 256, "repeat_penalty": 1.0, "seed": 42, "stop": ["\n\n"],
+  "json_schema": {},
+  "grammar": "root ::= ...",
+  "reuse_cache": true
+}
+```
+
+Supplying **both** `json_schema` and `grammar` is `INVALID_REQUEST`, not a precedence rule.
+A silent winner between two output constraints is a debugging session nobody should have.
+
+### LoRA
+
+| symbol | signature |
+|---|---|
+| `llb_chat_lora` | `const char*(llb_chat_t*, const char* request_json)` |
+
+One symbol, dispatched on an `"op"` field: `load` / `set` / `remove` / `clear` / `list`.
+Adding an operation therefore changes no signature and churns no binding — the same reason
+generation parameters travel in JSON. Every op returns the **full adapter set afterwards**,
+so a caller never tracks state the core already holds.
+
+### Embedding
+
+| symbol | signature |
+|---|---|
+| `llb_embed` | `const char*(llb_embed_t*, const char* request_json)` |
+| `llb_rerank` | `const char*(llb_embed_t*, const char* request_json)` |
+
+`llb_rerank` requires a handle created with `"pooling":"rank"` — that pooling type is what
+puts the classification head in the graph. Otherwise: `POOLING_NOT_RANK`, deliberately, in
+preference to numbers that look like scores.
+
+### Logging
+
+| symbol | signature |
+|---|---|
+| `llb_set_log_level` | `void(int level)` |
+| `llb_set_log_callback` | `void(llb_log_cb, void*)` |
+
+Levels: `0` none, `1` debug, `2` info, `3` warn, `4` error. **The bridge defaults to warn**,
+not the engine's default — llama.cpp writes hundreds of lines per model load to stderr, and
+a library embedded in someone else's application should be quiet unless asked. Pass a NULL
+callback to restore stderr. Both are safe to call before any model exists; call them
+*before* loading, because loading is when the engine starts talking.
+
+### Introspection
+
+| symbol | signature |
+|---|---|
+| `llb_model_info` | `const char*(const char* gguf_path)` |
+| `llb_version` | `const char*(void)` |
+
+`llb_model_info` loads the model, builds its chat templates, computes capabilities, frees it
+again — a pre-flight check before committing to a multi-gigabyte load. It returns
+`{"supports_tools", "supports_tool_calls", "has_tool_use_template", "chat_format", "error"}`.
+
+`llb_version` is the one exception to every ownership rule below: it returns a **static**
+pointer owned by the bridge. Do not free it.
+
+## Ownership
+
+Every `const char*` return except `llb_version` is `malloc`'d UTF-8 that **you** release with
+`llb_string_free`. There is no output-buffer protocol and no caller-supplied allocator: you
+do not size a buffer, and you do not guess.
+
+The trap for FFI bindings that marshal automatically: if your FFI converts a `char*` return
+into a native string, the original pointer is gone and `llb_string_free` becomes
+uncallable — every result leaks. Declare these returns as a raw pointer, copy the bytes
+yourself, then free. Go's binding types them `unsafe.Pointer` for exactly this reason.
+
+Handles are opaque. Never dereference `llb_chat_t*` or `llb_embed_t*`; hand them back.
+
+## Errors are data
+
+**No call returns NULL except the two `*_create` functions.** A failure is a normal return
+carrying error JSON:
+
+```json
+{ "type": "error", "error": { "code": "INVALID_REQUEST", "message": "messages array missing or empty" } }
+```
+
+`code` is stable, machine-readable, and identical in every binding. `message` is for humans
+and may change. Branch on `code`, never on `message`.
+
+| code | when |
+|---|---|
+| `INVALID_REQUEST` | malformed request JSON, empty `messages`, bad generation parameter, both constraints set |
+| `INVALID_REQUEST` | also covers the LoRA and embed calls: missing `op`, missing `id`, bad `input`. There used to be a second code, `BAD_REQUEST`, for exactly the same class of mistake, with no rule a reader could infer. There is one now. |
+| `ENGINE_NULL` | a null handle was passed |
+| `INFERENCE_FAILED` | generation aborted |
+| `INTERNAL_BRIDGE_ERROR` | template apply or response construction failed |
+| `LORA_LOAD_FAILED` / `LORA_APPLY_FAILED` / `LORA_NOT_FOUND` | adapter operations |
+| `POOLING_NOT_RANK` | `llb_rerank` on a handle that is not rank-pooled |
+| `POOLING_NONE` | `llb_embed` on a handle created with `"pooling":"none"` |
+| `EMBED_FAILED` / `RERANK_FAILED` | the engine failed the operation |
+
+`llb_chat_create` and `llb_embed_create` return NULL, because there is no handle to
+attach a result to. The reason is not lost: **`llb_last_error()`** returns the same error
+JSON as everything else — `MODEL_NOT_FOUND`, `MODEL_LOAD_FAILED`, `MODEL_NOT_TOOL_CAPABLE`,
+`CHAT_TEMPLATE_FAILED`, `CONTEXT_INIT_FAILED`, `OUT_OF_MEMORY`, `INVALID_ARGUMENT`. It is
+thread-local, and a successful create clears it, so a stale reason can never read as a
+fresh one.
+
+Until 0.2.0 there was no such call, and every binding string-matched the `create_failure:…`
+event and **invented** codes the core never emitted. That is behaviour living in a binding,
+which is the one thing this ABI exists to prevent. The event callback still fires and is
+unchanged — it is the live progress channel; `llb_last_error` is the post-mortem.
+
+## Callbacks, and their two different lifetimes
+
+```c
+typedef void (*llb_event_cb)(const char* event, void* user_data);
+typedef void (*llb_log_cb)(int level, const char* text, void* user_data);
+typedef int  (*llb_token_cb)(const char* token_piece, void* user_data);
+```
+
+**Retained.** The core **stores** `llb_event_cb` on the handle and calls it for the whole
+life of that handle — not only during create — and it stores `llb_log_cb` until it is
+replaced or cleared. Your trampoline must outlive the handle. A binding that lets it be
+collected when the constructor returns crashes later, from somewhere else. That is not
+theoretical: it segfaulted during development, and it is why every binding pins the event
+callback on the instance.
+
+**Not retained.** `llb_token_cb` is used **only for the duration of the
+`llb_chat_infer_stream` call it was passed to**, and is never stored. Hold it in a per-call
+local and release it when the call returns — a trampoline per inference, leaked forever, is
+the alternative.
+
+`llb_token_cb` returns `int`:
+
+| return | meaning |
+|---|---|
+| `0` | keep generating |
+| non-zero | **stop.** Generation ends before the next token is decoded |
+
+Stopping is a **result, not an error**. The call still returns a complete response with the
+text produced so far, honest usage counts, and `"finish_reason": "cancelled"` — those tokens
+were really generated and you were really billed for them. The KV cache is rolled back to
+the prompt boundary, so the abandoned partial turn can never be matched as a reusable prefix
+later.
+
+**Never let a host-language exception escape a callback.** The bridge is C++ with its own
+unwinding; a managed or interpreted exception crossing that frame is undefined behaviour.
+Catch it, return non-zero to stop, and re-raise after the native call has returned. The
+cancellation path exists precisely so you can.
+
+Fifteen symbols, and none of them is a socket.
+[Go reference →](/modelnexus/api/go/)

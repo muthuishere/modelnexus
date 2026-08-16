@@ -13,6 +13,7 @@
 package modelnexus
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -69,7 +70,60 @@ type Request struct {
 	RepeatPenalty *float64 `json:"repeat_penalty,omitempty"`
 	Seed          *uint32  `json:"seed,omitempty"`
 	Stop          []string `json:"stop,omitempty"`
+
+	// JSONSchema constrains the output to a JSON Schema. The returned Text is
+	// guaranteed to parse as JSON: the grammar llama.cpp derives from a schema
+	// deliberately permits a ```json fence, and the core strips it before returning.
+	//
+	// Any value that marshals to a JSON Schema object works -- but PREFER
+	// json.RawMessage, and read the next paragraph before reaching for a map.
+	//
+	// encoding/json SORTS map keys, so a schema built as map[string]any reaches the
+	// model with its properties in alphabetical order. Under grammar-constrained
+	// decoding property order is load-bearing: the model must emit the fields in the
+	// order the grammar allows, so it commits to a "rating" before it has reasoned out
+	// a "sentiment" it would otherwise have written first. This is not theoretical --
+	// the same prompt at the same seed returned rating 2 from Go and rating 3 from
+	// Python and JS, purely because Go had reordered the two properties. The output
+	// still parses, still validates, and is quietly a different answer.
+	//
+	// json.RawMessage preserves the order you wrote:
+	//
+	//	JSONSchema: json.RawMessage(`{
+	//	    "type": "object",
+	//	    "properties": {
+	//	        "sentiment": {"type": "string"},
+	//	        "rating":    {"type": "integer"}
+	//	    },
+	//	    "required": ["sentiment", "rating"]
+	//	}`)
+	//
+	// A struct with ordered fields works too; a map does not, and cannot be made to.
+	JSONSchema any `json:"json_schema,omitempty"`
+
+	// Grammar constrains the output to a raw GBNF grammar.
+	//
+	// Setting this together with JSONSchema is rejected by the core with
+	// INVALID_REQUEST rather than resolved by precedence: a silent winner between
+	// two output constraints is a debugging session nobody should have.
+	Grammar string `json:"grammar,omitempty"`
+
+	// ReuseCache controls KV prefix reuse across calls on the same Chat. The core's
+	// default is true, which is why this is a pointer -- leaving it nil means "the
+	// core decides", and a plain bool would silently opt every caller out.
+	//
+	// Reuse is purely a latency property; output is identical either way. Set it to
+	// false when calls must be provably independent (a determinism harness, or
+	// tenants sharing one handle).
+	ReuseCache *bool `json:"reuse_cache,omitempty"`
 }
+
+// ReuseCacheOff is a convenience for Request.ReuseCache, which needs an address.
+func ReuseCacheOff() *bool { off := false; return &off }
+
+// ReuseCacheOn is a convenience for Request.ReuseCache. It states the core's default
+// explicitly, which is worth doing in a test that is about the flag.
+func ReuseCacheOn() *bool { on := true; return &on }
 
 // Usage is the token accounting for one call.
 type Usage struct {
@@ -85,6 +139,34 @@ type Response struct {
 	ToolCalls    []ToolCall `json:"tool_calls"`
 	FinishReason string     `json:"finish_reason"`
 	Usage        Usage      `json:"usage"`
+}
+
+// FinishCancelled is the FinishReason of a generation a consumer stopped.
+//
+// A cancelled generation is a RESULT, not an error: the response carries the text
+// produced so far and honest usage counts, because those tokens were really
+// generated. Nothing here turns it into a Go error -- the caller decides.
+const FinishCancelled = "cancelled"
+
+// Cancelled reports whether generation was stopped early by the token callback or a
+// cancelled context.
+func (r *Response) Cancelled() bool { return r.FinishReason == FinishCancelled }
+
+// TokenCount is what a message list will cost, without running inference.
+type TokenCount struct {
+	// Tokens is the prompt length after the model's chat template is applied.
+	Tokens int `json:"tokens"`
+	// NCtx is the engine's context window, so a caller can compare the two.
+	NCtx int `json:"n_ctx"`
+}
+
+// CacheState is what the engine's KV cache holds, and the window it holds it in.
+type CacheState struct {
+	// Tokens is how much of the cache is resident, AFTER the operation that reported
+	// it -- so a clear always reports 0, and a caller can assert rather than assume.
+	Tokens int `json:"tokens"`
+	// NCtx is the engine's context window, so a caller can compare the two.
+	NCtx int `json:"n_ctx"`
 }
 
 // ModelInfo reports a model's tool-calling capability.
@@ -125,7 +207,7 @@ var (
 	cbMu      sync.Mutex
 	cbNextID  uintptr
 	eventSink = map[uintptr]func(string){}
-	tokenSink = map[uintptr]func(string){}
+	tokenSink = map[uintptr]func(string) bool{}
 
 	eventTrampoline uintptr
 	tokenTrampoline uintptr
@@ -143,19 +225,22 @@ func initTrampolines() {
 			}
 			return 0
 		})
+		// The ABI inverts Go's sense here: the C callback returns non-zero to STOP,
+		// while a Go consumer says "keep going" with true. The inversion lives in
+		// this one line so no consumer has to remember it.
 		tokenTrampoline = purego.NewCallback(func(piece unsafe.Pointer, user uintptr) uintptr {
 			cbMu.Lock()
 			fn := tokenSink[user]
 			cbMu.Unlock()
-			if fn != nil {
-				fn(goString(piece))
+			if fn != nil && !fn(goString(piece)) {
+				return 1
 			}
 			return 0
 		})
 	})
 }
 
-func registerSink(m map[uintptr]func(string), fn func(string)) uintptr {
+func registerSink[T any](m map[uintptr]T, fn T) uintptr {
 	cbMu.Lock()
 	defer cbMu.Unlock()
 	cbNextID++
@@ -164,7 +249,7 @@ func registerSink(m map[uintptr]func(string), fn func(string)) uintptr {
 	return id
 }
 
-func releaseSink(m map[uintptr]func(string), id uintptr) {
+func releaseSink[T any](m map[uintptr]T, id uintptr) {
 	cbMu.Lock()
 	defer cbMu.Unlock()
 	delete(m, id)
@@ -210,11 +295,42 @@ type Chat struct {
 // Option configures Open.
 type Option func(*openConfig)
 
-type openConfig struct{ onEvent func(string) }
+type openConfig struct {
+	onEvent func(string)
+	// Context parameters, marshalled to the core's create config. Zero means "not
+	// set" and is omitted, so an Open with no options sends NO config at all and the
+	// core applies exactly the defaults it used before the parameter existed.
+	nCtx, nBatch, nSeqMax int
+}
 
 // WithEventHandler receives the core's progress events during load and inference.
 func WithEventHandler(fn func(string)) Option {
 	return func(c *openConfig) { c.onEvent = fn }
+}
+
+// WithContextSize sets the engine's context window in tokens. Unset means the core's
+// default (llb_chat_create in core/include/llamabridge.h states it).
+//
+// This is create-time: it is the size of the KV cache, and it cannot be changed on a
+// live engine.
+func WithContextSize(n int) Option {
+	return func(c *openConfig) { c.nCtx = n }
+}
+
+// WithBatchSize sets the logical batch size. Unset means the core's default.
+func WithBatchSize(n int) Option {
+	return func(c *openConfig) { c.nBatch = n }
+}
+
+// WithMaxSequences reserves room for n concurrent sequences. Unset means the core's
+// default.
+//
+// It has no observable effect today. It is accepted now because it is a create-time
+// parameter -- the one kind that cannot be added later through request JSON -- so
+// reserving it is what lets multi-sequence slots arrive without an ABI break
+// (ADR-0008 D6).
+func WithMaxSequences(n int) Option {
+	return func(c *openConfig) { c.nSeqMax = n }
 }
 
 // Open loads a GGUF model and creates an inference engine.
@@ -231,6 +347,29 @@ func Open(ggufPath string, opts ...Option) (*Chat, error) {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	config := map[string]any{}
+	if cfg.nCtx > 0 {
+		config["n_ctx"] = cfg.nCtx
+	}
+	if cfg.nBatch > 0 {
+		config["n_batch"] = cfg.nBatch
+	}
+	if cfg.nSeqMax > 0 {
+		config["n_seq_max"] = cfg.nSeqMax
+	}
+	// No option set means NO config, not an empty object: the ABI's contract is that
+	// a NULL config behaves exactly as it did before the parameter existed, and "" is
+	// how purego spells NULL here. `{}` is a config that happens to say nothing, which
+	// takes a different path through the core and is a different thing to every other
+	// binding.
+	configJSON := ""
+	if len(config) > 0 {
+		encoded, err := json.Marshal(config)
+		if err != nil {
+			return nil, fmt.Errorf("modelnexus: could not encode config: %w", err)
+		}
+		configJSON = string(encoded)
+	}
 
 	chat := &Chat{}
 	// The core STORES this callback on the engine and calls it for the whole life of
@@ -245,7 +384,7 @@ func Open(ggufPath string, opts ...Option) (*Chat, error) {
 		}
 	})
 
-	handle := llbChatCreate(ggufPath, eventTrampoline, chat.eventID)
+	handle := llbChatCreate(ggufPath, configJSON, eventTrampoline, chat.eventID)
 	if handle == 0 {
 		defer releaseSink(eventSink, chat.eventID)
 		// NULL is the one place the core signals failure with a null pointer; the
@@ -273,29 +412,71 @@ func Open(ggufPath string, opts ...Option) (*Chat, error) {
 
 // Infer runs one turn and returns the response.
 func (c *Chat) Infer(req Request) (*Response, error) {
-	return c.infer(req, nil)
+	return c.infer(context.Background(), req, nil)
 }
 
 // InferStream runs one turn, calling onToken with each decoded piece as it is
 // produced. The complete response is still returned when generation finishes.
-func (c *Chat) InferStream(req Request, onToken func(string)) (*Response, error) {
-	return c.infer(req, onToken)
+//
+// onToken returns whether to KEEP GOING: return false to stop generation, which ends
+// the turn with FinishCancelled and a complete response carrying the text produced so
+// far. Stopping is a result, not an error.
+func (c *Chat) InferStream(req Request, onToken func(piece string) bool) (*Response, error) {
+	return c.infer(context.Background(), req, onToken)
 }
 
-func (c *Chat) infer(req Request, onToken func(string)) (*Response, error) {
+// InferContext is Infer, stopped by cancelling ctx.
+//
+// The ABI's only cancellation mechanism is the token callback's return value, so ctx
+// is checked once per decoded token: cancellation takes effect before the NEXT token,
+// not mid-token. A cancelled run returns a normal response with FinishCancelled and a
+// nil error -- the tokens were really generated and the usage counts are real, and
+// throwing that away to return ctx.Err() would lose the one thing the caller was
+// billed for. Check Response.Cancelled, or ctx.Err(), to tell the two apart.
+func (c *Chat) InferContext(ctx context.Context, req Request) (*Response, error) {
+	return c.infer(ctx, req, nil)
+}
+
+// InferStreamContext is InferStream, additionally stopped by cancelling ctx.
+// Either the callback returning false or ctx being cancelled ends generation.
+func (c *Chat) InferStreamContext(ctx context.Context, req Request, onToken func(piece string) bool) (*Response, error) {
+	return c.infer(ctx, req, onToken)
+}
+
+func (c *Chat) infer(ctx context.Context, req Request, onToken func(string) bool) (*Response, error) {
 	if c.handle == 0 {
 		return nil, &Error{Code: "ENGINE_CLOSED", Message: "this Chat has already been closed"}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("modelnexus: could not encode request: %w", err)
 	}
 
+	// A context that can never be cancelled needs no per-token check, so it takes
+	// the plain entry point -- the streaming one exists to carry the callback.
+	cancellable := ctx.Done() != nil
 	var raw string
-	if onToken == nil {
+	if onToken == nil && !cancellable {
 		raw = takeString(llbChatInfer(c.handle, string(payload)))
 	} else {
-		id := registerSink(tokenSink, onToken)
+		// The piece is delivered BEFORE the context is checked, deliberately: it has
+		// already been generated and is already counted in the response's usage, so
+		// withholding it would leave a consumer's accumulated text one token short of
+		// the Response.Text it is handed at the end.
+		step := func(piece string) bool {
+			keepGoing := true
+			if onToken != nil {
+				keepGoing = onToken(piece)
+			}
+			if cancellable && ctx.Err() != nil {
+				return false
+			}
+			return keepGoing
+		}
+		id := registerSink(tokenSink, step)
 		defer releaseSink(tokenSink, id)
 		raw = takeString(llbChatStream(c.handle, string(payload), tokenTrampoline, id))
 	}
@@ -319,6 +500,87 @@ func (c *Chat) infer(req Request, onToken func(string)) (*Response, error) {
 		return nil, fmt.Errorf("modelnexus: unparseable response: %w", err)
 	}
 	return &resp, nil
+}
+
+// CountTokens reports what a request's messages will cost, without generating.
+//
+// It applies the model's chat template and tokenizes; it creates no context, decodes
+// nothing, and does not disturb the KV cache, so it is safe to call between
+// inferences. Every generation parameter on req is ignored.
+//
+// This is an ABI call rather than a Go helper because counting needs both the model's
+// vocabulary and its parsed chat template, and a binding holds neither.
+func (c *Chat) CountTokens(req Request) (TokenCount, error) {
+	if c.handle == 0 {
+		return TokenCount{}, &Error{Code: "ENGINE_CLOSED", Message: "this Chat has already been closed"}
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return TokenCount{}, fmt.Errorf("modelnexus: could not encode request: %w", err)
+	}
+	raw := takeString(llbCountTokens(c.handle, string(payload)))
+
+	var res struct {
+		Type string `json:"type"`
+		TokenCount
+		Error *Error `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return TokenCount{}, fmt.Errorf("modelnexus: unparseable token count: %w", err)
+	}
+	if res.Type == "error" {
+		if res.Error != nil {
+			return TokenCount{}, res.Error
+		}
+		return TokenCount{}, &Error{Code: "UNKNOWN", Message: "core reported an error with no detail"}
+	}
+	return res.TokenCount, nil
+}
+
+// cache runs one KV-cache op and decodes the {"type":"cache"} reply.
+func (c *Chat) cache(op map[string]any) (CacheState, error) {
+	if c.handle == 0 {
+		return CacheState{}, &Error{Code: "ENGINE_CLOSED", Message: "this Chat has already been closed"}
+	}
+	payload, err := json.Marshal(op)
+	if err != nil {
+		return CacheState{}, fmt.Errorf("modelnexus: could not encode cache request: %w", err)
+	}
+	raw := takeString(llbChatCache(c.handle, string(payload)))
+
+	var res struct {
+		Type string `json:"type"`
+		CacheState
+		Error *Error `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		return CacheState{}, fmt.Errorf("modelnexus: unparseable cache response: %w", err)
+	}
+	if res.Type == "error" {
+		if res.Error != nil {
+			return CacheState{}, res.Error
+		}
+		return CacheState{}, &Error{Code: "UNKNOWN", Message: "core reported an error with no detail"}
+	}
+	return res.CacheState, nil
+}
+
+// CacheStatus reports what the engine's KV cache currently holds. It changes nothing.
+func (c *Chat) CacheStatus() (CacheState, error) {
+	return c.cache(map[string]any{"op": "status"})
+}
+
+// ClearCache drops the KV cache, freeing its memory and forgetting the sequence, and
+// returns the state afterwards -- which is always zero tokens, so a caller can assert
+// the release happened rather than trust that it did.
+//
+// Prefix reuse is right for a conversation that appends and wrong when a Chat moves to
+// unrelated work: the old conversation keeps occupying context memory, and two tenants
+// sharing a handle would share a cache. Passing ReuseCacheOff() on the next inference
+// also clears, but only as a side effect of doing work -- no help when the point is to
+// release memory now, or to prove the cache is empty before handing the handle on.
+func (c *Chat) ClearCache() (CacheState, error) {
+	return c.cache(map[string]any{"op": "clear"})
 }
 
 // Close releases the model and its context. Safe to call more than once.

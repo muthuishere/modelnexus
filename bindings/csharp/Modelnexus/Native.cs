@@ -21,6 +21,13 @@ internal static partial class Native
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void StringCallback(IntPtr text, IntPtr userData);
 
+    // int (*)(const char* token_piece, void* user_data) -- non-zero STOPS generation.
+    // Separate from StringCallback because of that return value: a void trampoline
+    // here would make every stream run to completion no matter what the consumer
+    // wants, and the mismatched signature is undefined behaviour besides.
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate int TokenCallback(IntPtr tokenPiece, IntPtr userData);
+
     static Native()
     {
         // A custom resolver rather than relying on the default probing paths: the
@@ -93,8 +100,11 @@ internal static partial class Native
                CharSet = CharSet.Ansi, BestFitMapping = false)]
     internal static extern IntPtr ModelInfo([MarshalAs(UnmanagedType.LPUTF8Str)] string ggufPath);
 
+    // configJson is nullable on purpose: a null string marshals to a NULL pointer,
+    // which is how the core is told "defaults" -- distinct from "{}".
     [DllImport(Lib, EntryPoint = "llb_chat_create", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ChatCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string ggufPath,
+                                             [MarshalAs(UnmanagedType.LPUTF8Str)] string? configJson,
                                              StringCallback? eventCb, IntPtr userData);
 
     [DllImport(Lib, EntryPoint = "llb_chat_infer", CallingConvention = CallingConvention.Cdecl)]
@@ -103,7 +113,13 @@ internal static partial class Native
     [DllImport(Lib, EntryPoint = "llb_chat_infer_stream", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ChatInferStream(IntPtr chat,
                                                   [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson,
-                                                  StringCallback? tokenCb, IntPtr userData);
+                                                  TokenCallback? tokenCb, IntPtr userData);
+
+    [DllImport(Lib, EntryPoint = "llb_count_tokens", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr CountTokens(IntPtr chat, [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson);
+
+    [DllImport(Lib, EntryPoint = "llb_chat_cache", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ChatCache(IntPtr chat, [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson);
 
     [DllImport(Lib, EntryPoint = "llb_chat_lora", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ChatLora(IntPtr chat, [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson);
@@ -111,9 +127,10 @@ internal static partial class Native
     [DllImport(Lib, EntryPoint = "llb_chat_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ChatDestroy(IntPtr chat);
 
+    // configJson is nullable here for the same reason as ChatCreate above.
     [DllImport(Lib, EntryPoint = "llb_embed_create", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr EmbedCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string ggufPath,
-                                              [MarshalAs(UnmanagedType.LPUTF8Str)] string configJson,
+                                              [MarshalAs(UnmanagedType.LPUTF8Str)] string? configJson,
                                               StringCallback? eventCb, IntPtr userData);
 
     [DllImport(Lib, EntryPoint = "llb_embed", CallingConvention = CallingConvention.Cdecl)]

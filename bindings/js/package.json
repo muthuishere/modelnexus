@@ -1,6 +1,6 @@
 {
   "name": "@muthuishere/modelnexus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local LLM inference in your own Node process \u2014 llama.cpp via a C ABI. No daemon, no port.",
   "type": "module",
   "main": "src/index.js",
@@ -21,9 +21,9 @@
   },
   "license": "MIT",
   "optionalDependencies": {
-    "@muthuishere/modelnexus-darwin-aarch64": "0.1.0",
-    "@muthuishere/modelnexus-darwin-x86_64": "0.1.0",
-    "@muthuishere/modelnexus-linux-x86_64": "0.1.0",
-    "@muthuishere/modelnexus-windows-x86_64": "0.1.0"
+    "@muthuishere/modelnexus-darwin-aarch64": "0.2.0",
+    "@muthuishere/modelnexus-darwin-x86_64": "0.2.0",
+    "@muthuishere/modelnexus-linux-x86_64": "0.2.0",
+    "@muthuishere/modelnexus-windows-x86_64": "0.2.0"
   }
 }

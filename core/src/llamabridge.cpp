@@ -80,6 +80,16 @@ struct llb_chat {
     common_chat_templates_ptr  templates;   // owns the parsed chat template(s)
     std::vector<llb_lora_slot> loras;       // active adapters, in application order
     int                        next_lora_id = 0;
+
+    /* Tokens currently resident in the KV cache for sequence 0.
+       This is what makes prefix reuse possible: a new prompt is diffed
+       against it, everything up to the divergence point stays decoded, and
+       only the tail is fed through llama_decode again.
+
+       INVARIANT: this vector and the cache agree exactly. Every path that
+       drops cache content must truncate this to match, or a later prefix
+       match will "reuse" positions that are not there. */
+    std::vector<llama_token>   cached;
 };
 
 /* Embedding / reranking engine.
@@ -108,6 +118,25 @@ static void emit(const struct llb_chat* chat, const char* msg) {
     if (chat && chat->event_cb && msg) {
         chat->event_cb(msg, chat->user_data);
     }
+}
+
+/* The last create failure on THIS thread, as error JSON.
+
+   llb_chat_create / llb_embed_create are the one hole in "errors are data,
+   not NULL": there is no handle to hang a result on, so they return NULL and
+   describe the reason through the event callback. Every binding was therefore
+   string-matching an event and SYNTHESISING codes the core never emitted --
+   binding-side behaviour invention, which ADR-0002 forbids everywhere else.
+
+   Thread-local so two threads loading two models cannot overwrite each
+   other's reason. Set on every create-failure path, read by llb_last_error. */
+static thread_local std::string g_last_error;
+
+static void set_create_error(const char* code, const std::string& message) {
+    json e;
+    e["type"]  = "error";
+    e["error"] = { {"code", code}, {"message", message} };
+    g_last_error = e.dump();
 }
 
 static void emit_raw(llb_event_cb cb, void* user_data, const char* msg) {
@@ -196,6 +225,12 @@ struct gen_params {
     float    repeat_penalty = 1.0f;   // 1.0 = disabled
     uint32_t seed          = LLAMA_DEFAULT_SEED;
     std::vector<std::string> stop;
+    bool     reuse_cache   = true;    // 0.2.0: prefix reuse is the default
+    /* Which KIND of grammar cparams.grammar turned out to be. Decided by the
+       request's source (template tool-calling / json_schema / raw grammar),
+       never assumed — see run_generation. */
+    common_grammar_type grammar_type = COMMON_GRAMMAR_TYPE_TOOL_CALLS;
+    bool     schema_constrained = false;  // strip a fence before returning
 };
 
 static common_chat_tool_choice parse_tool_choice(const std::string& s) {
@@ -322,11 +357,13 @@ static bool run_generation(struct llb_chat*           chat,
                            std::string&               out_text,
                            int&                       prompt_tokens_out,
                            int&                       completion_tokens_out,
-                           bool&                       hit_eog) {
+                           bool&                       hit_eog,
+                           bool&                       cancelled) {
     const llama_vocab* vocab = llama_model_get_vocab(chat->model);
     if (!vocab) return false;
 
-    hit_eog = false;
+    hit_eog   = false;
+    cancelled = false;
 
     // Tokenize the formatted prompt (special tokens parsed, BOS per template).
     std::vector<llama_token> tokens =
@@ -336,14 +373,61 @@ static bool run_generation(struct llb_chat*           chat,
     prompt_tokens_out = (int)tokens.size();
     const int32_t n_tok = (int32_t)tokens.size();
 
-    // Clear KV cache so each call is independent.
+    /* ---- KV cache: reuse the longest common prefix --------------------
+       An agent conversation only ever APPENDS, so the prompt's prefix is
+       identical turn after turn. Clearing the cache each call re-decodes all
+       of it: cost grows linearly per turn, and so total work over a session
+       grows quadratically. Diffing against the resident sequence and dropping
+       only the divergent tail makes per-turn prefill flat instead.
+
+       Measured on qwen2.5-1.5b over 32 turns (spike 0003): 4198 ms -> 829 ms,
+       9.0x at turn 32 and still widening. Reuse was ~26 ms at EVERY turn.
+
+       n_reuse == 0 degenerates to the old behaviour, so the worst case here is
+       exactly what shipped before. */
     llama_memory_t mem = llama_get_memory(chat->ctx);
-    if (mem) llama_memory_clear(mem, true);
+    int32_t n_reuse = 0;
+    if (mem) {
+        if (!gp.reuse_cache) {
+            llama_memory_clear(mem, true);
+            chat->cached.clear();
+        } else {
+            while (n_reuse < n_tok &&
+                   n_reuse < (int32_t)chat->cached.size() &&
+                   chat->cached[n_reuse] == tokens[n_reuse]) {
+                n_reuse++;
+            }
+            /* Never reuse the WHOLE prompt: llama needs at least one token to
+               decode in order to produce logits to sample from. */
+            if (n_reuse >= n_tok) n_reuse = n_tok - 1;
+            if (n_reuse < 0)      n_reuse = 0;
+
+            if (n_reuse == 0) {
+                llama_memory_clear(mem, true);
+            } else {
+                /* Drop everything past the divergence point. Positions
+                   [0, n_reuse) stay decoded and keep their meaning because the
+                   tokens that produced them are identical. */
+                llama_memory_seq_rm(mem, 0, (llama_pos)n_reuse, -1);
+            }
+            chat->cached.assign(tokens.begin(), tokens.begin() + n_reuse);
+        }
+    } else {
+        chat->cached.clear();
+    }
 
     int n_batch = (int)llama_n_batch(chat->ctx);
     if (n_batch <= 0) n_batch = 512;
 
     const bool has_enc = llama_model_has_encoder(chat->model);
+    if (has_enc && n_reuse > 0) {
+        /* Encoder-decoder models re-run the encoder over the whole input, so a
+           partially-decoded decoder cache is not a valid starting point. Reuse
+           is simply not available here; fall back rather than be subtly wrong. */
+        llama_memory_clear(mem, true);
+        chat->cached.clear();
+        n_reuse = 0;
+    }
     if (has_enc) {
         for (int32_t i = 0; i < n_tok; i += n_batch) {
             int32_t chunk = n_tok - i;
@@ -358,13 +442,19 @@ static bool run_generation(struct llb_chat*           chat,
         llama_batch dec_batch = llama_batch_get_one(&dec_start, 1);
         if (llama_decode(chat->ctx, dec_batch) != 0) return false;
     } else {
-        for (int32_t i = 0; i < n_tok; i += n_batch) {
+        /* Decode ONLY the divergent tail. llama_batch_get_one leaves positions
+           to llama_decode, which starts each sequence at seq_pos_max + 1 — and
+           after the seq_rm above that is exactly n_reuse. */
+        for (int32_t i = n_reuse; i < n_tok; i += n_batch) {
             int32_t chunk = n_tok - i;
             if (chunk > n_batch) chunk = n_batch;
             llama_batch batch = llama_batch_get_one(tokens.data() + i, chunk);
             if (llama_decode(chat->ctx, batch) != 0) return false;
         }
     }
+    /* The cache now holds the whole prompt. Record it BEFORE generating, so
+       that a failure mid-generation still leaves `cached` truthful. */
+    chat->cached = tokens;
 
     // Build the common_sampler honouring the request's full parameter set,
     // plus any tool-call grammar produced by common_chat_templates_apply.
@@ -376,9 +466,14 @@ static bool run_generation(struct llb_chat*           chat,
     sparams.min_p          = gp.min_p;
     sparams.penalty_repeat = gp.repeat_penalty;
 
-    // Wire the chat-template grammar (tool calls / output format) through.
+    /* Wire the grammar through with the type that MATCHES ITS SOURCE.
+       This used to be hardcoded to TOOL_CALLS. The three types are not
+       interchangeable: common_grammar_needs_prefill() feeds the generation
+       prompt into the grammar sampler for TOOL_CALLS and OUTPUT_FORMAT but
+       NOT for USER, because a caller's own GBNF was never written to accept
+       the template's assistant header. Prefilling it corrupts the grammar. */
     if (!cparams.grammar.empty()) {
-        sparams.grammar = { COMMON_GRAMMAR_TYPE_TOOL_CALLS, cparams.grammar };
+        sparams.grammar = { gp.grammar_type, cparams.grammar };
     }
     sparams.grammar_lazy       = cparams.grammar_lazy;
     sparams.grammar_triggers   = cparams.grammar_triggers;
@@ -406,12 +501,25 @@ static bool run_generation(struct llb_chat*           chat,
         }
 
         std::string piece = common_token_to_piece(vocab, tok, /*special=*/false);
+        bool stop_requested = false;
         if (!piece.empty()) {
             out_text += piece;
-            if (token_cb) token_cb(piece.c_str(), user_data);
+            /* 0.2.0: a non-zero return means STOP. Before this the callback
+               returned void, so a consumer that walked away — cancelled
+               context, closed stream, user pressed stop — could not tell the
+               model, and it generated (and billed) to completion. */
+            if (token_cb && token_cb(piece.c_str(), user_data) != 0) {
+                stop_requested = true;
+            }
         }
 
         n_decoded++;
+        chat->cached.push_back(tok);
+
+        if (stop_requested) {
+            cancelled = true;
+            break;
+        }
 
         // Honour stop strings: truncate and finish if one appears.
         bool stopped = false;
@@ -433,6 +541,22 @@ static bool run_generation(struct llb_chat*           chat,
 
     common_sampler_free(smpl);
     completion_tokens_out = n_decoded;
+
+    /* ---- roll the cache back after a cancellation ---------------------
+       THIS IS WHAT MAKES REUSE SAFE. A cancelled generation leaves a partial
+       assistant turn in the cache. Left there, the next call's prefix match
+       would happily extend a TRUNCATED turn as though it were complete — no
+       error, plausible-looking output, extremely hard to trace. So the cache
+       goes back to the prompt boundary and `cached` is truncated to match.
+
+       Stop strings are deliberately NOT rolled back: that output is complete
+       as far as the caller is concerned, and it is a legitimate prefix. */
+    if (cancelled && mem) {
+        llama_memory_seq_rm(mem, 0, (llama_pos)n_tok, -1);
+        if ((int32_t)chat->cached.size() > n_tok) {
+            chat->cached.resize(n_tok);
+        }
+    }
     return true;
 }
 
@@ -485,6 +609,9 @@ static const char* infer_impl(llb_chat_t*   chat,
                 gp.stop.push_back(req["stop"].get<std::string>());
             }
         }
+        if (req.contains("reuse_cache") && req["reuse_cache"].is_boolean()) {
+            gp.reuse_cache = req["reuse_cache"].get<bool>();
+        }
     } catch (const std::exception& e) {
         return build_error("INVALID_REQUEST", std::string("bad generation parameter: ") + e.what());
     }
@@ -504,6 +631,49 @@ static const char* infer_impl(llb_chat_t*   chat,
     } catch (const std::exception& e) {
         return build_error("INVALID_REQUEST", std::string("failed to parse messages/tools: ") + e.what());
     }
+
+    std::string user_grammar;   /* caller-supplied GBNF, installed post-apply */
+
+    /* ---- constrained output (0.2.0) -----------------------------------
+       llama.cpp already turns a JSON Schema into a GBNF grammar inside
+       common_chat_templates_apply; the bridge simply never set the fields.
+
+       Both at once is an ERROR, not a precedence rule: a silent winner
+       between two output constraints is a debugging session nobody should
+       have. */
+    {
+        const bool has_schema  = req.contains("json_schema") && !req["json_schema"].is_null();
+        const bool has_grammar = req.contains("grammar") && req["grammar"].is_string()
+                                 && !req["grammar"].get<std::string>().empty();
+        if (has_schema && has_grammar) {
+            return build_error("INVALID_REQUEST",
+                "json_schema and grammar are mutually exclusive — supply at most one");
+        }
+        if (has_schema) {
+            inputs.json_schema     = req["json_schema"].dump();
+            gp.grammar_type        = COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT;
+            gp.schema_constrained  = true;
+        } else if (has_grammar) {
+            /* A raw GBNF and tools cannot both constrain the same generation —
+               upstream throws on it. Reject it here with a request error rather
+               than letting an exception surface as an internal one. */
+            if (!inputs.tools.empty() && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
+                return build_error("INVALID_REQUEST",
+                    "grammar cannot be combined with tools — the tool-call grammar owns the output");
+            }
+            /* NOT inputs.grammar. On the jinja path (which is the only path we
+               use) upstream VALIDATES inputs.grammar and then discards it: every
+               format handler rebuilds data.grammar from scratch, so a caller's
+               GBNF is silently ignored. Verified at b9371 —
+               common/chat.cpp:2354 assigns it, :2413 checks it, and nothing
+               applies it. We therefore hold it and install it after the
+               template has been applied. */
+            user_grammar    = req["grammar"].get<std::string>();
+            /* USER, not TOOL_CALLS: a caller's own GBNF must NOT be prefilled
+               with the template's generation prompt. */
+            gp.grammar_type = COMMON_GRAMMAR_TYPE_USER;
+        }
+    }
     inputs.add_generation_prompt = true;
     inputs.use_jinja             = true;
 
@@ -515,14 +685,24 @@ static const char* infer_impl(llb_chat_t*   chat,
         return build_error("INTERNAL_BRIDGE_ERROR", std::string("template apply failed: ") + e.what());
     }
 
+    /* Install the caller's GBNF over whatever the template produced. Triggers
+       and laziness belong to the discarded grammar, not to this one: a lazy
+       grammar with no trigger would never activate. */
+    if (!user_grammar.empty()) {
+        cparams.grammar      = user_grammar;
+        cparams.grammar_lazy = false;
+        cparams.grammar_triggers.clear();
+    }
+
     // Run generation.
     std::string out_text;
     int pt = 0, ct = 0;
     bool hit_eog = false;
+    bool cancelled = false;
     bool ok;
     try {
         ok = run_generation(chat, cparams, gp, token_cb, user_data,
-                            out_text, pt, ct, hit_eog);
+                            out_text, pt, ct, hit_eog, cancelled);
     } catch (const std::exception& e) {
         emit(chat, "infer_failure");
         return build_error("INFERENCE_FAILED", std::string("generation aborted: ") + e.what());
@@ -564,8 +744,34 @@ static const char* infer_impl(llb_chat_t*   chat,
         });
     }
 
+    /* ---- schema output must actually be JSON ---------------------------
+       The grammar llama.cpp generates from a JSON Schema DELIBERATELY permits
+       a markdown fence — its root rule is
+         root ::= "...assistant\n" space space ("```json" space RF space "```" | RF)
+       so fenced output is CONFORMANT. Returning it raw would break the one
+       promise the feature makes: that the caller can parse the result. Strip
+       the fence here, once, rather than in five bindings and every consumer. */
+    if (gp.schema_constrained && parsed.tool_calls.empty()) {
+        std::string& c = parsed.content;
+        size_t open_at = c.find("```");
+        if (open_at != std::string::npos) {
+            size_t nl = c.find('\n', open_at);
+            size_t close_at = c.rfind("```");
+            if (nl != std::string::npos && close_at != std::string::npos && close_at > nl) {
+                c = c.substr(nl + 1, close_at - nl - 1);
+                while (!c.empty() && (c.back() == '\n' || c.back() == '\r')) c.pop_back();
+            }
+        }
+    }
+
     std::string finish_reason;
-    if (!parsed.tool_calls.empty()) {
+    if (cancelled) {
+        /* A cancellation is a RESULT, not an error: the caller gets the text
+           produced so far and honest usage counts. Checked FIRST because a
+           cancelled turn may also have parsed as a partial tool call. */
+        resp["type"]  = parsed.tool_calls.empty() ? "assistant_text" : "tool_call";
+        finish_reason = "cancelled";
+    } else if (!parsed.tool_calls.empty()) {
         resp["type"]  = "tool_call";
         finish_reason = "tool_calls";
     } else {
@@ -593,10 +799,13 @@ static const char* infer_impl(llb_chat_t*   chat,
 /* ------------------------------------------------------------------ */
 
 extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
+                                       const char* config_json,
                                        llb_event_cb event_cb,
                                        void* user_data) {
+    g_last_error.clear();   // a stale reason must never read as a fresh one
     if (!gguf_path) {
         emit_raw(event_cb, user_data, "create_failure:null_path");
+        set_create_error("INVALID_ARGUMENT", "gguf_path is NULL");
         return nullptr;
     }
 
@@ -605,6 +814,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
         FILE* f = fopen(gguf_path, "rb");
         if (!f) {
             emit_raw(event_cb, user_data, "create_failure:model_not_found");
+        set_create_error("MODEL_NOT_FOUND", "no file at " + std::string(gguf_path));
             return nullptr;
         }
         fclose(f);
@@ -613,6 +823,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     llb_chat_t* chat = new (std::nothrow) llb_chat();
     if (!chat) {
         emit_raw(event_cb, user_data, "create_failure:oom");
+        set_create_error("OUT_OF_MEMORY", "could not allocate the engine");
         return nullptr;
     }
     chat->model_path = gguf_path;
@@ -631,6 +842,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     chat->model = llama_model_load_from_file(gguf_path, mparams);
     if (!chat->model) {
         emit(chat, "create_failure:load_model");
+        set_create_error("MODEL_LOAD_FAILED", "llama.cpp could not load " + std::string(gguf_path));
         delete chat;
         return nullptr;
     }
@@ -639,9 +851,45 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     cparams.n_ctx   = 4096;
     cparams.n_batch = 512;
 
+    /* Echo the configuration EXACTLY as received, before parsing. The parity
+       gate compares this across bindings: two bindings can send different
+       configs and still behave identically today, then diverge the moment a
+       core default moves. Observing what was actually sent is stronger
+       evidence than asking a binding what it thinks it sends. */
+    emit(chat, (std::string("create_config:") + (config_json && *config_json ? config_json : "null")).c_str());
+
+    /* 0.2.0: optional configuration, mirroring llb_embed_create. NULL / "" /
+       an unparseable object all fall back to the defaults above, which are
+       exactly what this function used before the parameter existed — so a
+       caller that passes NULL sees no behaviour change at all. */
+    if (config_json && *config_json) {
+        try {
+            json cfg = json::parse(config_json);
+            if (cfg.contains("n_ctx") && cfg["n_ctx"].is_number()) {
+                int v = cfg["n_ctx"].get<int>();
+                if (v > 0) cparams.n_ctx = (uint32_t)v;
+            }
+            if (cfg.contains("n_batch") && cfg["n_batch"].is_number()) {
+                int v = cfg["n_batch"].get<int>();
+                if (v > 0) cparams.n_batch = (uint32_t)v;
+            }
+            /* Reserved. Has no observable effect yet — it is taken now because
+               it is a CREATE-TIME parameter, the one thing request JSON cannot
+               add later, and reserving it is what lets slots arrive without an
+               ABI break. */
+            if (cfg.contains("n_seq_max") && cfg["n_seq_max"].is_number()) {
+                int v = cfg["n_seq_max"].get<int>();
+                if (v > 0) cparams.n_seq_max = (uint32_t)v;
+            }
+        } catch (const std::exception&) {
+            emit(chat, "create_warning:bad_config_json");
+        }
+    }
+
     chat->ctx = llama_init_from_model(chat->model, cparams);
     if (!chat->ctx) {
         emit(chat, "create_failure:init_context");
+        set_create_error("CONTEXT_INIT_FAILED", "could not create an inference context (n_ctx too large?)");
         llama_model_free(chat->model);
         delete chat;
         return nullptr;
@@ -653,6 +901,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
         chat->templates = common_chat_templates_init(chat->model, "");
     } catch (const std::exception& e) {
         emit(chat, "create_failure:chat_template");
+        set_create_error("CHAT_TEMPLATE_FAILED", "the GGUF has no usable chat template");
         llama_free(chat->ctx);
         llama_model_free(chat->model);
         delete chat;
@@ -660,6 +909,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     }
     if (!chat->templates) {
         emit(chat, "create_failure:chat_template");
+        set_create_error("CHAT_TEMPLATE_FAILED", "the GGUF has no usable chat template");
         llama_free(chat->ctx);
         llama_model_free(chat->model);
         delete chat;
@@ -673,6 +923,7 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
         tool_caps tc = compute_tool_caps(chat->model, chat->templates.get());
         if (!(tc.supports_tools && tc.supports_tool_calls)) {
             emit(chat, "create_failure:tools_unsupported");
+        set_create_error("MODEL_NOT_TOOL_CAPABLE", std::string(gguf_path) + " has a chat template that cannot describe or round-trip tool calls");
             chat->templates.reset();
             llama_free(chat->ctx);
             llama_model_free(chat->model);
@@ -802,18 +1053,18 @@ static json lora_state(const llb_chat_t* chat) {
 extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json) {
     if (!chat)         return build_error("ENGINE_NULL", "chat handle is null");
     if (!chat->ctx)    return build_error("ENGINE_CLOSED", "engine has no context");
-    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+    if (!request_json) return build_error("INVALID_REQUEST", "request JSON is null");
 
     json req;
     try {
         req = json::parse(request_json);
     } catch (const std::exception& e) {
-        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + e.what());
+        return build_error("INVALID_REQUEST", std::string("could not parse request JSON: ") + e.what());
     }
 
     const std::string op = req.value("op", "");
     if (op.empty()) {
-        return build_error("BAD_REQUEST", "missing \"op\" (load|set|remove|clear|list)");
+        return build_error("INVALID_REQUEST", "missing \"op\" (load|set|remove|clear|list)");
     }
 
     json out;
@@ -826,7 +1077,7 @@ extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json)
 
     if (op == "load") {
         const std::string path = req.value("path", "");
-        if (path.empty()) return build_error("BAD_REQUEST", "\"load\" requires a \"path\"");
+        if (path.empty()) return build_error("INVALID_REQUEST", "\"load\" requires a \"path\"");
 
         struct llama_adapter_lora* adapter = llama_adapter_lora_init(chat->model, path.c_str());
         if (!adapter) {
@@ -855,7 +1106,7 @@ extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json)
     }
 
     if (op == "set") {
-        if (!req.contains("id")) return build_error("BAD_REQUEST", "\"set\" requires an \"id\"");
+        if (!req.contains("id")) return build_error("INVALID_REQUEST", "\"set\" requires an \"id\"");
         const int   id    = req.value("id", -1);
         const float scale = req.value("scale", 1.0f);
         bool found = false;
@@ -872,7 +1123,7 @@ extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json)
     }
 
     if (op == "remove") {
-        if (!req.contains("id")) return build_error("BAD_REQUEST", "\"remove\" requires an \"id\"");
+        if (!req.contains("id")) return build_error("INVALID_REQUEST", "\"remove\" requires an \"id\"");
         const int id = req.value("id", -1);
         bool found = false;
         for (size_t i = 0; i < chat->loras.size(); ++i) {
@@ -897,7 +1148,7 @@ extern "C" const char* llb_chat_lora(llb_chat_t* chat, const char* request_json)
         return dup_cstr(out.dump());
     }
 
-    return build_error("BAD_REQUEST", "unknown op \"" + op + "\" (load|set|remove|clear|list)");
+    return build_error("INVALID_REQUEST", "unknown op \"" + op + "\" (load|set|remove|clear|list)");
 }
 
 /* ================================================================== */
@@ -917,14 +1168,17 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
                                          const char* config_json,
                                          llb_event_cb event_cb,
                                          void* user_data) {
+    g_last_error.clear();   // a stale reason must never read as a fresh one
     if (!gguf_path) {
         emit_raw(event_cb, user_data, "create_failure:null_path");
+        set_create_error("INVALID_ARGUMENT", "gguf_path is NULL");
         return nullptr;
     }
     {
         FILE* f = fopen(gguf_path, "rb");
         if (!f) {
             emit_raw(event_cb, user_data, "create_failure:model_not_found");
+        set_create_error("MODEL_NOT_FOUND", "no file at " + std::string(gguf_path));
             return nullptr;
         }
         fclose(f);
@@ -936,6 +1190,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
             cfg = json::parse(config_json);
         } catch (const std::exception&) {
             emit_raw(event_cb, user_data, "create_failure:bad_config");
+        set_create_error("INVALID_REQUEST", "config_json is not a JSON object");
             return nullptr;
         }
     }
@@ -944,6 +1199,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     llb_embed_t* e = new (std::nothrow) struct llb_embed();
     if (!e) {
         emit_raw(event_cb, user_data, "create_failure:oom");
+        set_create_error("OUT_OF_MEMORY", "could not allocate the engine");
         return nullptr;
     }
     e->model_path = gguf_path;
@@ -952,6 +1208,9 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     e->pooling    = parse_pooling(cfg.value("pooling", std::string()));
 
     emit_raw(event_cb, user_data, "create_start");
+    /* Same echo as llb_chat_create — see the note there. */
+    emit_raw(event_cb, user_data,
+             (std::string("create_config:") + (config_json && *config_json ? config_json : "null")).c_str());
 
     ensure_log_sink();
     llama_backend_init();
@@ -962,6 +1221,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     e->model = llama_model_load_from_file(gguf_path, mparams);
     if (!e->model) {
         emit_raw(event_cb, user_data, "create_failure:load_model");
+        set_create_error("MODEL_LOAD_FAILED", "llama.cpp could not load " + std::string(gguf_path));
         delete e;
         return nullptr;
     }
@@ -982,6 +1242,7 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     e->ctx = llama_init_from_model(e->model, cparams);
     if (!e->ctx) {
         emit_raw(event_cb, user_data, "create_failure:init_context");
+        set_create_error("CONTEXT_INIT_FAILED", "could not create an inference context (n_ctx too large?)");
         llama_model_free(e->model);
         delete e;
         return nullptr;
@@ -1089,13 +1350,13 @@ static bool embed_all(llb_embed_t* e,
 extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
     if (!e)            return build_error("ENGINE_NULL", "embed handle is null");
     if (!e->ctx)       return build_error("ENGINE_CLOSED", "engine has no context");
-    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+    if (!request_json) return build_error("INVALID_REQUEST", "request JSON is null");
 
     json req;
     try {
         req = json::parse(request_json);
     } catch (const std::exception& ex) {
-        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + ex.what());
+        return build_error("INVALID_REQUEST", std::string("could not parse request JSON: ") + ex.what());
     }
 
     std::vector<std::string> inputs;
@@ -1105,7 +1366,7 @@ extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
         else if (in.is_array())  for (const auto& v : in) if (v.is_string()) inputs.push_back(v.get<std::string>());
     }
     if (inputs.empty()) {
-        return build_error("BAD_REQUEST", "\"input\" must be a string or a non-empty array of strings");
+        return build_error("INVALID_REQUEST", "\"input\" must be a string or a non-empty array of strings");
     }
 
     if (e->pooling == LLAMA_POOLING_TYPE_NONE) {
@@ -1153,7 +1414,7 @@ extern "C" const char* llb_embed(llb_embed_t* e, const char* request_json) {
 extern "C" const char* llb_rerank(llb_embed_t* e, const char* request_json) {
     if (!e)            return build_error("ENGINE_NULL", "embed handle is null");
     if (!e->ctx)       return build_error("ENGINE_CLOSED", "engine has no context");
-    if (!request_json) return build_error("BAD_REQUEST", "request JSON is null");
+    if (!request_json) return build_error("INVALID_REQUEST", "request JSON is null");
 
     if (e->pooling != LLAMA_POOLING_TYPE_RANK) {
         /* Refuse rather than return numbers that look like scores and are not:
@@ -1166,17 +1427,17 @@ extern "C" const char* llb_rerank(llb_embed_t* e, const char* request_json) {
     try {
         req = json::parse(request_json);
     } catch (const std::exception& ex) {
-        return build_error("BAD_REQUEST", std::string("could not parse request JSON: ") + ex.what());
+        return build_error("INVALID_REQUEST", std::string("could not parse request JSON: ") + ex.what());
     }
 
     const std::string query = req.value("query", "");
-    if (query.empty()) return build_error("BAD_REQUEST", "\"query\" is required");
+    if (query.empty()) return build_error("INVALID_REQUEST", "\"query\" is required");
 
     std::vector<std::string> docs;
     if (req.contains("documents") && req["documents"].is_array()) {
         for (const auto& v : req["documents"]) if (v.is_string()) docs.push_back(v.get<std::string>());
     }
-    if (docs.empty()) return build_error("BAD_REQUEST", "\"documents\" must be a non-empty array of strings");
+    if (docs.empty()) return build_error("INVALID_REQUEST", "\"documents\" must be a non-empty array of strings");
 
     const struct llama_vocab* vocab = llama_model_get_vocab(e->model);
     const llama_token bos = llama_vocab_bos(vocab);
@@ -1248,8 +1509,133 @@ extern "C" void llb_embed_destroy(llb_embed_t* e) {
     delete e;
 }
 
+/* Why the most recent create failed, on this thread, as error JSON.
+
+   Returns NULL when the last create on this thread succeeded, or when none
+   has run -- so a caller can distinguish "no failure" from "a failure with
+   no detail". */
+extern "C" const char* llb_last_error(void) {
+    if (g_last_error.empty()) return nullptr;
+    return dup_cstr(g_last_error);
+}
+
 extern "C" void llb_string_free(const char* s) {
     free((void*)s);
+}
+
+/* ------------------------------------------------------------------ */
+/* Token counting                                                      */
+/*                                                                     */
+/* Applies the chat template and tokenizes. No context, no decode, no  */
+/* cache mutation — calling this between two inferences cannot disturb */
+/* prefix reuse.                                                       */
+/*                                                                     */
+/* This is an ABI entry point rather than a binding helper because     */
+/* counting needs BOTH the model's vocabulary and its parsed chat      */
+/* template, and a binding holds neither.                              */
+/* ------------------------------------------------------------------ */
+extern "C" const char* llb_count_tokens(llb_chat_t* chat, const char* request_json) {
+    if (!chat || chat->closed) {
+        return build_error("ENGINE_CLOSED", "chat engine is closed or NULL");
+    }
+    if (!request_json) {
+        return build_error("INVALID_REQUEST", "request_json is NULL");
+    }
+
+    json req;
+    try {
+        req = json::parse(request_json);
+    } catch (const std::exception& e) {
+        return build_error("INVALID_REQUEST", std::string("malformed request JSON: ") + e.what());
+    }
+    if (!req.contains("messages") || !req["messages"].is_array() || req["messages"].empty()) {
+        return build_error("INVALID_REQUEST", "messages array missing or empty");
+    }
+
+    common_chat_templates_inputs inputs;
+    try {
+        inputs.messages = common_chat_msgs_parse_oaicompat(req["messages"]);
+        if (req.contains("tools") && !req["tools"].is_null()) {
+            inputs.tools = common_chat_tools_parse_oaicompat(req["tools"]);
+        }
+        if (req.contains("tool_choice") && req["tool_choice"].is_string()) {
+            inputs.tool_choice = parse_tool_choice(req["tool_choice"].get<std::string>());
+        }
+    } catch (const std::exception& e) {
+        return build_error("INVALID_REQUEST", std::string("failed to parse messages/tools: ") + e.what());
+    }
+    inputs.add_generation_prompt = true;
+    inputs.use_jinja             = true;
+
+    common_chat_params cparams;
+    try {
+        cparams = common_chat_templates_apply(chat->templates.get(), inputs);
+    } catch (const std::exception& e) {
+        return build_error("INTERNAL_BRIDGE_ERROR", std::string("template apply failed: ") + e.what());
+    }
+
+    const llama_vocab* vocab = llama_model_get_vocab(chat->model);
+    if (!vocab) return build_error("INTERNAL_BRIDGE_ERROR", "model has no vocabulary");
+
+    /* Same tokenize call the generation path makes, so the number reported is
+       the number that will actually be decoded — not an approximation. */
+    std::vector<llama_token> tokens =
+        common_tokenize(vocab, cparams.prompt, /*add_special=*/true, /*parse_special=*/true);
+
+    json resp;
+    resp["type"]   = "token_count";
+    resp["tokens"] = (int)tokens.size();
+    resp["n_ctx"]  = (int)llama_n_ctx(chat->ctx);
+
+    const char* out = dup_cstr(resp.dump());
+    if (!out) return build_error("INTERNAL_BRIDGE_ERROR", "failed to build response");
+    return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* KV cache control                                                    */
+/*                                                                     */
+/* One entry point, JSON op dispatch — the llb_chat_lora pattern. The  */
+/* reported token count is always the state AFTER the operation, so a  */
+/* caller can assert rather than assume.                               */
+/* ------------------------------------------------------------------ */
+extern "C" const char* llb_chat_cache(llb_chat_t* chat, const char* request_json) {
+    if (!chat || chat->closed) {
+        return build_error("ENGINE_CLOSED", "chat engine is closed or NULL");
+    }
+
+    std::string op = "status";
+    if (request_json && *request_json) {
+        try {
+            json req = json::parse(request_json);
+            if (req.contains("op") && req["op"].is_string()) {
+                op = req["op"].get<std::string>();
+            }
+        } catch (const std::exception& e) {
+            return build_error("INVALID_REQUEST", std::string("malformed request JSON: ") + e.what());
+        }
+    }
+
+    if (op == "clear") {
+        llama_memory_t mem = llama_get_memory(chat->ctx);
+        if (mem) llama_memory_clear(mem, true);
+        /* The vector and the cache must agree exactly — a retained sequence
+           describing positions that are no longer there is precisely the bug
+           prefix reuse would then act on. */
+        chat->cached.clear();
+    } else if (op != "status") {
+        return build_error("INVALID_REQUEST",
+            "unknown cache op \"" + op + "\" — expected \"status\" or \"clear\"");
+    }
+
+    json resp;
+    resp["type"]   = "cache";
+    resp["tokens"] = (int)chat->cached.size();
+    resp["n_ctx"]  = (int)llama_n_ctx(chat->ctx);
+
+    const char* out = dup_cstr(resp.dump());
+    if (!out) return build_error("INTERNAL_BRIDGE_ERROR", "failed to build response");
+    return out;
 }
 
 extern "C" void llb_chat_destroy(llb_chat_t* chat) {

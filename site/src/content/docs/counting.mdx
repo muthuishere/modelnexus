@@ -1,0 +1,101 @@
+---
+title: Counting tokens
+description: Measure a message list against the context window before you commit to a call. No decode, no context, ~6 ms.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Ask what a conversation will cost before you send it.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+count, err := chat.CountTokens(modelnexus.Request{Messages: history})
+fmt.Println(count.Tokens, count.NCtx)     // e.g. 2084 8192
+```
+</TabItem>
+<TabItem label="Python">
+```python
+counted = chat.count_tokens(history)
+print(counted["tokens"], counted["n_ctx"])   # e.g. 2084 8192
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const { tokens, nCtx } = chat.countTokens({ messages: history })
+console.log(tokens, nCtx)                    // e.g. 2084 8192
+```
+</TabItem>
+</Tabs>
+
+You always get **both** numbers, because a token count means nothing without the window it
+has to fit in.
+
+Measured: 81 messages → 2084 tokens in **5.92 ms** — 4.56 ms applying the chat template,
+1.36 ms tokenizing. No context is created. Nothing is decoded. The KV cache is not touched,
+so calling this between two inferences cannot disturb [reuse](/modelnexus/cache/).
+
+Generation parameters on the request are ignored. `tools` are not: a tool schema is
+serialised into the prompt by the chat template, and it is often the largest thing in it.
+
+## Why it is in the ABI
+
+Counting needs the model's **vocabulary** and its **parsed chat template**. A binding holds
+neither — it holds an opaque handle. Every tokenizer estimate written in a host language is
+a guess at both, and the guess is wrong in the direction that matters: it ignores the
+template's control tokens, its tool serialisation, and its per-role scaffolding.
+
+That is the test for whether something belongs in the C surface. If a host could compute
+it, it would be a helper. It cannot, so it is an entry point — one of fifteen.
+
+## Against the window
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+chat, _ := modelnexus.Open(path, modelnexus.WithContextSize(8192))
+
+count, _ := chat.CountTokens(modelnexus.Request{Messages: history})
+for count.Tokens > count.NCtx-512 {         // leave room to generate
+	history = history[2:]                   // drop the oldest exchange
+	count, _ = chat.CountTokens(modelnexus.Request{Messages: history})
+}
+resp, _ := chat.Infer(modelnexus.Request{Messages: history})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+chat = Chat(path, n_ctx=8192)
+
+counted = chat.count_tokens(history)
+while counted["tokens"] > counted["n_ctx"] - 512:   # leave room to generate
+    history = history[2:]                           # drop the oldest exchange
+    counted = chat.count_tokens(history)
+r = chat.infer(history)
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const chat = new Chat(path, { nCtx: 8192 })
+
+let c = chat.countTokens({ messages: history })
+while (c.tokens > c.nCtx - 512) {          // leave room to generate
+  history = history.slice(2)               // drop the oldest exchange
+  c = chat.countTokens({ messages: history })
+}
+const r = chat.infer({ messages: history })
+```
+</TabItem>
+</Tabs>
+
+`n_ctx` holds the prompt **and** the generation. Subtract your `max_tokens` before you
+compare, or you will overflow at the end of a call rather than the start.
+
+`n_ctx` is fixed when the context is built and defaults to 4096. It cannot change on a live
+engine — it is the size of the KV cache.
+
+Trimming the front of a conversation invalidates the cached prefix, so the next call
+re-prefills the whole thing. That is the price of trimming; it is still cheaper than
+overflowing.
+
+[Embeddings →](/modelnexus/embeddings/)

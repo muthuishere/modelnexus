@@ -1,0 +1,182 @@
+---
+title: modelnexus
+description: A local LLM that runs inside your process. No server, no daemon, no HTTP. Go, Python and JavaScript, all on one C ABI.
+template: splash
+hero:
+  tagline: The model runs inside your process. Not next to it.
+  actions:
+    - text: Quickstart
+      link: /modelnexus/quickstart/
+      icon: right-arrow
+    - text: GitHub
+      link: https://github.com/muthuishere/modelnexus
+      icon: external
+      variant: minimal
+---
+
+import { Tabs, TabItem, Card, CardGrid } from '@astrojs/starlight/components';
+
+## No server. No daemon. No port.
+
+Every other way to run a local model puts a process between you and it. You start a server,
+you wait for it, you speak HTTP to your own machine, you ship a second thing to production,
+and you find out at 3am that it died.
+
+modelnexus is a library. You load it the way you load any other library.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+chat, _ := modelnexus.Open("qwen2.5-1.5b-instruct-q4_k_m.gguf")
+defer chat.Close()
+
+resp, _ := chat.Infer(modelnexus.Request{
+    Messages: []modelnexus.Message{{Role: "user", Content: "Name the capital of France."}},
+})
+fmt.Println(resp.Text)
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from modelnexus import Chat
+
+with Chat("qwen2.5-1.5b-instruct-q4_k_m.gguf") as chat:
+    r = chat.infer([{"role": "user", "content": "Name the capital of France."}])
+    print(r["text"])
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+import { Chat } from '@muthuishere/modelnexus'
+
+const chat = new Chat('qwen2.5-1.5b-instruct-q4_k_m.gguf')
+const r = chat.infer({ messages: [{ role: 'user', content: 'Name the capital of France.' }] })
+console.log(r.text)
+chat.close()
+```
+</TabItem>
+</Tabs>
+
+That is the whole thing. No `docker run`, no health check, no retry loop, no localhost.
+
+## Ask for a shape. Get that shape.
+
+The reason small local models are hard to use is that they answer in prose when you needed a
+record. Give modelnexus a JSON Schema and the model **cannot** produce anything else — the
+schema is compiled into a grammar and the sampler is constrained by it, token by token.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+resp, _ := chat.Infer(modelnexus.Request{
+    Messages:   []modelnexus.Message{{Role: "user", Content: "Describe Paris."}},
+    JSONSchema: map[string]any{
+        "type": "object",
+        "properties": map[string]any{
+            "city":    map[string]any{"type": "string"},
+            "country": map[string]any{"type": "string"},
+        },
+        "required":             []string{"city", "country"},
+        "additionalProperties": false,
+    },
+})
+// resp.Text is guaranteed to parse.
+```
+</TabItem>
+<TabItem label="Python">
+```python
+r = chat.infer(
+    [{"role": "user", "content": "Describe Paris."}],
+    json_schema={
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "country": {"type": "string"}},
+        "required": ["city", "country"],
+        "additionalProperties": False,
+    },
+)
+json.loads(r["text"])   # never raises
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const r = chat.infer({
+  messages: [{ role: 'user', content: 'Describe Paris.' }],
+  jsonSchema: {
+    type: 'object',
+    properties: { city: { type: 'string' }, country: { type: 'string' } },
+    required: ['city', 'country'],
+    additionalProperties: false,
+  },
+})
+JSON.parse(r.text)   // never throws
+```
+</TabItem>
+</Tabs>
+
+Not "usually valid". Not "valid after a retry". **Valid, because nothing else was sampleable.**
+
+## Conversations stop re-reading themselves
+
+An agent loop appends. Turn twelve sends everything from turns one through eleven, again.
+Most runtimes re-read all of it, every turn — cost per turn grows, so cost per conversation
+grows quadratically.
+
+modelnexus keeps what is already computed and recomputes only what actually changed.
+
+| turn | prompt | re-read every turn | modelnexus |
+|---|---|---|---|
+| 8 | 374 tokens | 54.7 ms | 25.1 ms |
+| 16 | 757 tokens | 121.5 ms | 26.1 ms |
+| 24 | 1141 tokens | 190.2 ms | 26.6 ms |
+| 32 | 1525 tokens | 247.2 ms | **27.3 ms** |
+
+Read the right-hand column: it does not move. Over 32 turns that is 4198 ms of prefill against
+829 ms — **9× by the last turn, and the gap was still widening when the measurement stopped.**
+On a 1.5-billion-parameter model. It gets better with a bigger one, not worse.
+
+Output is unchanged. This is latency, and it is on by default.
+
+<CardGrid>
+	<Card title="Structured output" icon="seti:json">
+		A JSON Schema or a raw GBNF grammar. The result is guaranteed to parse.
+		[Read more](/modelnexus/structured-output/)
+	</Card>
+	<Card title="Streaming, and stopping" icon="seti:pipeline">
+		Tokens as they arrive. Return `false` and generation stops on that token.
+		[Read more](/modelnexus/streaming/)
+	</Card>
+	<Card title="Embeddings and reranking" icon="magnifier">
+		Normalised vectors, and a real cross-encoder reranker — same library.
+		[Read more](/modelnexus/embeddings/)
+	</Card>
+	<Card title="LoRA at runtime" icon="puzzle">
+		Load, scale, stack and remove adapters on a live model.
+		[Read more](/modelnexus/lora/)
+	</Card>
+</CardGrid>
+
+## One ABI. One behaviour.
+
+modelnexus is a **C ABI** with a thin binding on top of it — not three implementations that
+try to stay in sync. Every capability lives in the C surface and appears in every binding, or
+it does not ship.
+
+That is testable, so it is tested: all three bindings run the same schema-constrained request
+and must return **byte-identical text and an identical token count**. A binding that quietly
+reshapes a result fails that gate while passing its own suite.
+
+Each binding is still idiomatic. Go returns `(T, error)` and honours a cancelled
+`context.Context`. Python raises and takes keyword arguments. JavaScript returns objects.
+Same behaviour, native shape.
+
+## Honest limits
+
+- **CPU and Metal.** No CUDA in the published builds yet.
+- **GGUF only**, because there is exactly one inference runtime underneath (llama.cpp) and
+  that is a deliberate, permanent choice.
+- **No Java binding.** mochallama already serves the JVM.
+- **C# works and is tested, but is not published** to NuGet.
+- **One conversation per handle.** Multiple concurrent conversations in one context are
+  measured and work, but are not exposed yet.
+
+[What modelnexus is not →](/modelnexus/not/)

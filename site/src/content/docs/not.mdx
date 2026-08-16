@@ -1,0 +1,95 @@
+---
+title: What it is not
+description: The things modelnexus will never do, the reasons, and the gaps that exist today.
+---
+
+Scope is the feature. Each of these is a decision on record, not an oversight.
+
+## Not a model server
+
+Ollama, llama-server and LM Studio give you a shared endpoint, a model catalogue, a pull
+command and a UI. If that is what you want, use one — they are good, and modelnexus is not
+competing with them.
+
+modelnexus embeds a model **inside** one application. No port, no daemon, no second process
+in your deployment. That is the entire proposition, and it is the one thing a server cannot
+give you.
+
+A server on top of the core is a fine thing to build. It just cannot be the core.
+
+## Not a second inference runtime
+
+**llama.cpp only. Permanently.** ONNX Runtime will never be linked into this core — not in
+any build mode, not behind any flag ([ADR-0001](https://github.com/muthuishere/modelnexus/blob/main/docs/adr/0001-one-core-one-runtime.md)).
+
+The reasoning is not aesthetic. An abstraction over two engines can expose only their
+**intersection**, and that intersection excludes runtime LoRA — the capability that
+justified the repo. `onnxruntime-genai`, where hot-swappable adapters live, has no Go
+binding, and Go is the primary target. A second engine would also double the native closure:
+two prebuilt libraries × five platforms, on every release.
+
+If in-process ONNX is ever genuinely needed it will be a *separate* core reusing this repo's
+distribution machinery — not a backend of this one.
+
+So: GGUF only. No safetensors, no `.onnx`, no PyTorch checkpoints.
+
+## Not an agent framework
+
+modelnexus emits OpenAI-shaped `tool_calls` — `id`, `name`, `arguments` — and stops. It never
+executes one. That is [toolnexus](https://github.com/muthuishere/toolnexus)'s job.
+
+**Neither library depends on the other, in any direction, ever**
+([ADR-0003](https://github.com/muthuishere/modelnexus/blob/main/docs/adr/0003-modelnexus-and-toolnexus-do-not-depend-on-each-other.md)).
+They meet at the wire shape and nowhere else. An edge from toolnexus to modelnexus would give
+a provider-agnostic tool library a native dependency and a hard link to one engine; an edge
+the other way would put an orchestration loop inside an inference library.
+
+You import both and wire them in a few lines. That is the intended shape, and the convenience
+of one-import-gets-you-an-agent is deliberately given up.
+
+The rule that keeps this honest: **the core must never grow a tool executor, an agent loop,
+or a retrieval layer.**
+
+## No Java binding
+
+Go, Python, JavaScript — plus a C# binding that works and is tested but is **not published**
+to NuGet ([ADR-0007](https://github.com/muthuishere/modelnexus/blob/main/docs/adr/0007-how-natives-reach-each-ecosystem.md)).
+
+The JVM is served by [mochallama](https://github.com/deemwar-products/mochallama), which ships
+the same C surface behind Java/Panama, is already on Maven Central, and comes with the Spring
+autoconfiguration, OpenAI-compatible endpoint and Actuator integration a JVM developer
+actually wants ([ADR-0006](https://github.com/muthuishere/modelnexus/blob/main/docs/adr/0006-no-java-binding.md)).
+A raw FFI binding was never the thing a Spring developer was asking for.
+
+Completeness is not a user.
+
+## The gaps, today
+
+Named because they are real, and tracked because they are not permanent.
+
+**No slots, no continuous batching.** One handle is one conversation. Multiple independent
+conversations in one context are measured and work — **4 slots × 24 tokens: 642 ms serial
+(150 tok/s) → 305 ms batched (314 tok/s), 2.1×**, widening with slot count — but they are not
+exposed. This is additive: a `session` field on the request and the `n_seq_max` config key
+that already exists. It does not need an ABI break, which is why it can wait.
+
+When it lands it will carry an explicit per-slot logits index. The spike that measured it
+first produced four distinct streams of confident garbage — `"The221 greater."` — because
+slot 0 read slot 3's logits, and a "the outputs differ" assertion passes that happily.
+
+**No cache eviction policy.** Every measurement fits inside `n_ctx`. What happens when a
+conversation outgrows the window — reject, shift with `n_keep`, or evict — is a design
+decision that has not been made. Count your tokens and trim your own history.
+
+**No CUDA in the published builds.** CPU and Metal. The bridge can be built against CUDA;
+the released natives are not.
+
+**Single-threaded.** Every measurement is one thread. Whether one context can be driven from
+N host threads is untested, and the likely answer is "no — serialise at the bridge".
+
+**Numbers are from a 1.5B model on an M-series Mac.** The cache-reuse and batching gaps
+should widen with model size. That is an argument from mechanism, not a measurement, and it
+is stated as such.
+
+Ready to run one?
+[Quickstart →](/modelnexus/quickstart/)

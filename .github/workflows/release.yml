@@ -226,4 +226,21 @@ jobs:
           JSON
             publish_dir "./$pkg"
           done
+          # The launcher's optionalDependencies pin the platform packages BY VERSION,
+          # and those are generated above from $VERSION. Hand-maintained pins drift the
+          # moment someone bumps package.json and forgets these four lines -- and the
+          # failure is a launcher that resolves a version of the native package that was
+          # never published, which npm treats as an OPTIONAL dependency and skips in
+          # silence. Rewrite them from the one source of truth instead.
+          node -e '
+            const fs = require("fs");
+            const p = "./bindings/js/package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            const v = process.env.VERSION;
+            for (const k of Object.keys(j.optionalDependencies || {})) {
+              j.optionalDependencies[k] = v;
+            }
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+            console.log("pinned optionalDependencies to " + v);
+          '
           publish_dir ./bindings/js

@@ -114,7 +114,8 @@ type EmbedOptions struct {
 	Pooling Pooling
 	// NCtx is the context size; 0 means the model default.
 	NCtx int
-	// NBatch caps how many tokens one input may have. Defaults to 512.
+	// NBatch caps how many tokens one input may have; 0 means the core's default
+	// (llb_embed_create in core/include/llamabridge.h states it).
 	NBatch int
 	// OnEvent receives lifecycle events during load.
 	OnEvent func(string)
@@ -152,9 +153,15 @@ func OpenEmbedder(ggufPath string, opts *EmbedOptions) (*Embedder, error) {
 	if opts.NBatch > 0 {
 		config["n_batch"] = opts.NBatch
 	}
-	payload, err := json.Marshal(config)
-	if err != nil {
-		return nil, fmt.Errorf("modelnexus: could not encode config: %w", err)
+	// "" is NULL to the ABI, and NULL means "every default, exactly as before the
+	// parameter existed". An empty object is not the same request -- see Open.
+	payload := ""
+	if len(config) > 0 {
+		encoded, err := json.Marshal(config)
+		if err != nil {
+			return nil, fmt.Errorf("modelnexus: could not encode config: %w", err)
+		}
+		payload = string(encoded)
 	}
 
 	e := &Embedder{}
@@ -168,7 +175,7 @@ func OpenEmbedder(ggufPath string, opts *EmbedOptions) (*Embedder, error) {
 		}
 	})
 
-	handle := llbEmbedCreate(ggufPath, string(payload), eventTrampoline, e.eventID)
+	handle := llbEmbedCreate(ggufPath, payload, eventTrampoline, e.eventID)
 	if handle == 0 {
 		defer releaseSink(eventSink, e.eventID)
 		e.mu.Lock()

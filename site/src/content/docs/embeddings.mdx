@@ -1,0 +1,108 @@
+---
+title: Embeddings
+description: One vector per input, L2-normalised, so a dot product is a cosine similarity. Pooling is fixed when the handle is created.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Vectors come back **L2-normalised**. That is the whole trick: a dot product of two unit
+vectors *is* their cosine similarity, so ranking needs no division and no norm bookkeeping.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+emb, err := modelnexus.OpenEmbedder("bge-small.gguf", &modelnexus.EmbedOptions{
+    Pooling: modelnexus.PoolingMean,
+    NCtx:    512,
+})
+defer emb.Close()
+
+vectors, _ := emb.Embed([]string{"hello world", "goodbye world"})
+
+var dot float32
+for i := range vectors[0] {
+    dot += vectors[0][i] * vectors[1][i]   // == cosine similarity
+}
+```
+</TabItem>
+<TabItem label="Python">
+```python
+from modelnexus import Embedder
+
+with Embedder("bge-small.gguf", pooling="mean", n_ctx=512) as emb:
+    a, b = emb.embed(["hello world", "goodbye world"])
+    similarity = sum(x * y for x, y in zip(a, b))   # == cosine similarity
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+import { Embedder } from '@muthuishere/modelnexus'
+
+const emb = new Embedder('bge-small.gguf', { pooling: 'mean', nCtx: 512 })
+const [a, b] = emb.embed(['hello world', 'goodbye world'])
+const similarity = a.reduce((s, x, i) => s + x * b[i], 0)   // == cosine similarity
+emb.close()
+```
+</TabItem>
+</Tabs>
+
+Turn normalisation off when you want the raw magnitudes — and then you own the arithmetic.
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
+```go
+raw, _ := emb.EmbedRaw([]string{"hello world"})
+```
+</TabItem>
+<TabItem label="Python">
+```python
+raw = emb.embed(["hello world"], normalize=False)
+```
+</TabItem>
+<TabItem label="JavaScript">
+```js
+const raw = emb.embed(['hello world'], { normalize: false })
+```
+</TabItem>
+</Tabs>
+
+## Batch in one call
+
+One call, many texts, one result list **in input order**. There is no reordering to undo
+and no id to carry — index `i` of the output is index `i` of the input. Batching amortises
+the decode, which is where the time goes.
+
+`nBatch` (default 512) caps how many tokens a **single** input may occupy, not how many
+inputs you may pass. A document longer than that is the failure to plan for; chunk before
+you embed.
+
+## Pooling is chosen once, at load
+
+A model produces one vector per *token*. Pooling reduces those to one vector per *input*.
+
+| pooling | what it takes | use it for |
+|---|---|---|
+| `mean` | the average of all token vectors | sentence embedders — the usual answer |
+| `cls` | the first token's vector | BERT-style encoders trained with a CLS head |
+| `last` | the final token's vector | decoder-style embedders |
+| `rank` | the model's classification head | [reranking](/modelnexus/reranking/) only |
+| `none` | nothing pooled | not usable with `embed` — it fails with `POOLING_NONE` |
+
+Omit it and the model's own default applies.
+
+**It cannot be changed afterwards.** Pooling is a property of the context's compute graph,
+fixed when the context is built. This is why `Embedder` is a separate handle from `Chat`
+rather than a method on it: a generation context is created without embeddings enabled and
+without a pooling type, and switching either would mean silently reloading the model behind
+your back. One handle, one job — the cost is a second model in memory if you need both.
+
+## What it costs
+
+- A second resident model. An embedder and a chat model are two loads, two contexts.
+- `mean` and `cls` are not interchangeable. Using the wrong one for a model produces
+  vectors that look fine, cluster badly, and never raise anything.
+- Scores are only comparable against vectors from **the same model**. Re-embed the corpus
+  when you change models — there is no migration.
+
+Vector similarity is a good filter and a mediocre judge.
+[Reranking →](/modelnexus/reranking/)

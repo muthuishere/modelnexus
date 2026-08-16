@@ -1,0 +1,133 @@
+---
+title: Python
+description: Every public name in the modelnexus package — Chat, Embedder, errors and log control.
+---
+
+```bash
+pip install muthuishere-modelnexus
+```
+
+```python
+import modelnexus
+```
+
+The distribution is `muthuishere-modelnexus` because the bare name is held by an unrelated
+project. The import is `modelnexus`. No runtime dependencies — the binding is `ctypes` from
+the standard library, and the native library ships inside the wheel.
+
+## Module functions
+
+| function | purpose |
+|---|---|
+| `version() -> str` | bridge version and the linked llama.cpp tag |
+| `model_info(gguf_path) -> dict` | tool-calling capability without loading an engine |
+| `platform_key() -> str` | `darwin-aarch64`, `linux-x86_64`, … |
+| `set_log_level(level: int) -> None` | how much the engine says |
+| `set_log_handler(handler \| None) -> None` | `handler(level, text)`; `None` restores stderr |
+
+`LogLevel.NONE|DEBUG|INFO|WARN|ERROR` are `0`–`4`. The bridge defaults to `WARN`. Call
+`set_log_level` **before** loading — llama.cpp starts logging during load.
+
+## `Chat`
+
+```python
+with modelnexus.Chat("model.gguf", n_ctx=8192) as chat:
+    r = chat.infer([{"role": "user", "content": "hello"}], max_tokens=64, seed=1)
+    print(r["text"], r["usage"]["total_tokens"])
+```
+
+```python
+Chat(gguf_path, *, n_ctx=None, n_batch=None, n_seq_max=None, on_event=None)
+```
+
+Context-manager or `close()` — it holds a native handle either way. `n_ctx`, `n_batch` and
+`n_seq_max` are fixed when the context is built, which is why they live on the constructor
+and every generation parameter lives on `infer`.
+
+### `infer`
+
+```python
+infer(messages, *, tools=None, tool_choice=None, on_token=None,
+      json_schema=None, grammar=None, reuse_cache=None, **params) -> dict
+```
+
+`**params` passes `temperature`, `top_k`, `top_p`, `min_p`, `max_tokens`, `repeat_penalty`,
+`seed` and `stop` straight into the request JSON, so a new core parameter needs no release
+here.
+
+Returns the parsed response dict: `type`, `text`, `tool_calls`, `finish_reason`, `usage`.
+Failures raise `ModelError`.
+
+`on_token` streams. **Only an explicit `False` stops generation** — a callback that just
+prints returns `None`, and `None` is not `False`. Raising also stops: the exception is caught
+at the C boundary, generation ends, and it is re-raised once the native call has unwound.
+
+A cancelled turn is a normal return with `finish_reason == "cancelled"` and the text produced
+so far. It does not raise.
+
+```python
+pieces = []
+r = chat.infer(
+    [{"role": "user", "content": "Count: 1 2 3"}],
+    max_tokens=24, seed=1, on_token=pieces.append,
+)
+```
+
+### The rest
+
+| method | notes |
+|---|---|
+| `count_tokens(messages, *, tools=None) -> dict` | `{"tokens": N, "n_ctx": M}`; no decode, cache untouched |
+| `load_lora(path, scale=1.0) -> int` | returns the adapter id |
+| `set_lora_scale(adapter_id, scale) -> None` | takes effect next inference |
+| `remove_lora(adapter_id) -> None` | unloads one, reapplies the rest |
+| `clear_loras() -> None` | no-op on an empty set |
+| `loras() -> list[dict]` | `[{"id", "path", "scale"}, …]` in order |
+| `close() -> None` | idempotent |
+
+## `Embedder`
+
+```python
+Embedder(gguf_path, *, pooling=None, n_ctx=0, n_batch=512, on_event=None)
+```
+
+Separate from `Chat` because embedding needs a context built with embeddings enabled and a
+pooling strategy fixed at creation — and reranking needs `pooling="rank"` specifically.
+Neither can be switched afterwards.
+
+| method | notes |
+|---|---|
+| `embed(texts, *, normalize=True) -> list[list[float]]` | one string or many; one vector per input, in input order |
+| `rerank(query, documents, *, top_n=None) -> list[dict]` | `[{"index", "score"}, …]` best first |
+| `close() -> None` | idempotent |
+
+`index` is the document's position in the list you passed in, because results come back
+reordered. `score` is a raw logit — comparable within one call, not across models, not a
+probability.
+
+```python
+with modelnexus.Embedder("bge-reranker-v2-m3-Q4_K_M.gguf", pooling="rank") as rr:
+    for hit in rr.rerank("capital of France?", docs, top_n=3):
+        print(hit["index"], hit["score"])
+```
+
+## Errors
+
+| exception | when |
+|---|---|
+| `ModelError(RuntimeError)` | any failure the core reports. `.code` and `.message` |
+| `ToolsUnsupportedError(ModelError)` | the model's chat template cannot do tool calling, so it was rejected at load. `.code == "MODEL_NOT_TOOL_CAPABLE"` |
+| `NativeLibraryNotFound(RuntimeError)` | the bridge could not be located or loaded. Raised at first use, not at import |
+
+`.code` is stable and identical across every language binding. `.message` is for humans.
+Branch on the code.
+
+```python
+try:
+    emb.rerank("q", ["a"])
+except modelnexus.ModelError as e:
+    if e.code == "POOLING_NOT_RANK":
+        ...
+```
+
+[JavaScript reference →](/modelnexus/api/js/)

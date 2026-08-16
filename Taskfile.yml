@@ -130,14 +130,28 @@ tasks:
         done
 
   test:
-    desc: Build, then run every binding's tests
+    desc: Build, then run the C ABI suite, every binding, and the parity gate
     cmds:
       - task: models
       - task: build
+      - task: test:c
       - task: test:python
       - task: test:go
       - task: test:csharp
       - task: test:js
+      - task: test:agreement
+
+  test:c:
+    desc: The ABI itself — plain C, no language runtime, no test framework
+    cmds: ['./core/tests/run.sh']
+    env:
+      MODELNEXUS_MODEL: '{{.MODEL}}'
+
+  test:agreement:
+    desc: Parity gate — every binding must return byte-identical output (ADR-0002)
+    cmds: ['./core/tests/agreement.sh']
+    env:
+      MODELNEXUS_MODEL: '{{.MODEL}}'
 
   test:python:
     desc: Python binding (ctypes) smoke test
@@ -179,6 +193,32 @@ tasks:
       MODELNEXUS_LORA_BASE: '{{.LORA_BASE}}'
       MODELNEXUS_LORA: '{{.LORA}}'
     cmds: ['npm install --silent', 'npm test --silent']
+
+  # ---------------------------------------------------------------- examples
+
+  examples:
+    desc: Run every example in every language (examples/) against the real models
+    cmds: ['./examples/run.sh all']
+    env: &example_env
+      MODELNEXUS_MODEL: '{{.MODEL}}'
+      MODELNEXUS_RERANKER: '{{.RERANKER}}'
+      MODELNEXUS_LORA_BASE: '{{.LORA_BASE}}'
+      MODELNEXUS_LORA: '{{.LORA}}'
+
+  examples:go:
+    desc: Run the Go examples only
+    cmds: ['./examples/run.sh go']
+    env: *example_env
+
+  examples:python:
+    desc: Run the Python examples only
+    cmds: ['./examples/run.sh python']
+    env: *example_env
+
+  examples:js:
+    desc: Run the JS examples only
+    cmds: ['./examples/run.sh js']
+    env: *example_env
 
   # ---------------------------------------------------------------- publishing
 

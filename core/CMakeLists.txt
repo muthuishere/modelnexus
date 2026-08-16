@@ -46,7 +46,7 @@ target_include_directories(llamabridge
 )
 
 target_compile_definitions(llamabridge PRIVATE
-    LLB_BRIDGE_VERSION="0.1.0"
+    LLB_BRIDGE_VERSION="0.2.0"
     LLB_LLAMA_TAG="b9371"
 )
 
@@ -64,7 +64,12 @@ if(DEFINED LLB_PREBUILT_DIR AND NOT LLB_PREBUILT_DIR STREQUAL "")
     endif()
     find_library(LLB_LIB_LLAMA  NAMES llama        PATHS "${LLB_PREBUILT_DIR}" NO_DEFAULT_PATH REQUIRED)
     find_library(LLB_LIB_COMMON NAMES llama-common PATHS "${LLB_PREBUILT_DIR}" NO_DEFAULT_PATH REQUIRED)
-    target_link_libraries(llamabridge PRIVATE "${LLB_LIB_LLAMA}" "${LLB_LIB_COMMON}")
+    # ggml-base carries ggml_abort, which common_grammar's constructor reaches
+    # through GGML_ASSERT. It was previously pulled in transitively only because
+    # the grammar type was a compile-time constant the optimiser folded away;
+    # selecting the type at runtime (0.2.0) makes the reference real.
+    find_library(LLB_LIB_GGML   NAMES ggml-base    PATHS "${LLB_PREBUILT_DIR}" NO_DEFAULT_PATH REQUIRED)
+    target_link_libraries(llamabridge PRIVATE "${LLB_LIB_LLAMA}" "${LLB_LIB_COMMON}" "${LLB_LIB_GGML}")
 else()
     # -------------------- SOURCE MODE (fallback) --------------------
     message(STATUS "llamabridge: building llama.cpp FROM SOURCE (fallback mode)")

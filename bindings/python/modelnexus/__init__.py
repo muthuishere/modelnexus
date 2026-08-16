@@ -134,12 +134,21 @@ class Chat:
 
     Holds a native handle, so it must be closed. Use it as a context manager, or
     call :meth:`close` yourself.
+
+    ``n_ctx``, ``n_batch`` and ``n_seq_max`` are fixed when the context is built and
+    cannot be changed per request, which is why they live here and every generation
+    parameter lives on :meth:`infer`. Each is omitted from the request when left
+    unset, and the model's default applies -- the values are documented once, on
+    ``llb_chat_create`` in ``llamabridge.h``, and are not restated here.
     """
 
     def __init__(
         self,
         gguf_path: str,
         *,
+        n_ctx: int | None = None,
+        n_batch: int | None = None,
+        n_seq_max: int | None = None,
         on_event: Callable[[str], None] | None = None,
     ) -> None:
         self._lib = load()
@@ -158,8 +167,20 @@ class Chat:
         # local here is collected as soon as __init__ returns and the next event emitted
         # by the core jumps into freed memory. Verified: it segfaults.
         self._event_cb = EVENT_CB(_on_event)
+
+        config: dict[str, Any] = {}
+        if n_ctx is not None:
+            config["n_ctx"] = n_ctx
+        if n_batch is not None:
+            config["n_batch"] = n_batch
+        if n_seq_max is not None:
+            config["n_seq_max"] = n_seq_max
+        # No keys means send NULL, not "{}" -- the core's defaults are then reached by
+        # the same path they were before this parameter existed.
+        config_json = json.dumps(config).encode("utf-8") if config else None
+
         handle = self._lib.llb_chat_create(
-            str(gguf_path).encode("utf-8"), self._event_cb, None
+            str(gguf_path).encode("utf-8"), config_json, self._event_cb, None
         )
 
         if not handle:
@@ -180,17 +201,49 @@ class Chat:
         *,
         tools: Iterable[Mapping[str, Any]] | None = None,
         tool_choice: str | None = None,
-        on_token: Callable[[str], None] | None = None,
-        **params: Any,
+        on_token: Callable[[str], Any] | None = None,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        min_p: float | None = None,
+        max_tokens: int | None = None,
+        repeat_penalty: float | None = None,
+        seed: int | None = None,
+        stop: Sequence[str] | None = None,
+        json_schema: Mapping[str, Any] | None = None,
+        grammar: str | None = None,
+        reuse_cache: bool | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one turn and return the parsed response.
 
         Pass ``on_token`` to stream: it is called with each decoded piece as it is
         produced, and the full response is still returned when generation finishes.
+        Return ``False`` from it to stop generating -- returning ``None``, which is
+        what a callback that only prints does, keeps going. Raising also stops, and
+        the exception is re-raised here once the native call has unwound.
+
+        A cancelled turn is a normal response carrying the text produced so far,
+        honest usage counts and ``finish_reason == "cancelled"``. It is a result,
+        not an error, so it does not raise.
+
+        ``json_schema`` constrains the output to a JSON Schema and the returned text
+        is guaranteed to parse; ``grammar`` constrains it to raw GBNF. Supplying both
+        is a core-side ``INVALID_REQUEST``, not a precedence rule.
+
+        ``reuse_cache`` defaults to the core's own default (reuse on). Set it False
+        when calls must be provably independent -- a determinism harness, or tenants
+        sharing one handle. It affects latency, never output.
 
         Generation parameters (``temperature``, ``top_k``, ``top_p``, ``min_p``,
-        ``max_tokens``, ``repeat_penalty``, ``seed``, ``stop``) travel inside the
-        request JSON, so new ones need no change here.
+        ``max_tokens``, ``repeat_penalty``, ``seed``, ``stop``) are named here and
+        omitted from the request when left unset, so the core owns every default.
+
+        A misspelled keyword is a ``TypeError`` from Python itself and nothing is
+        sent. To reach a core parameter this binding has not named yet, pass
+        ``extra={"mirostat": 2}`` -- it goes to the wire unchanged. It is a dict
+        rather than ``**kwargs`` for exactly one reason: a dict cannot be reached by
+        a typo, so an unnamed parameter stays deliberate.
         """
         self._check_open()
 
@@ -199,26 +252,134 @@ class Chat:
             request["tools"] = list(tools)
         if tool_choice is not None:
             request["tool_choice"] = tool_choice
-        request.update(params)
+        if temperature is not None:
+            request["temperature"] = temperature
+        if top_k is not None:
+            request["top_k"] = top_k
+        if top_p is not None:
+            request["top_p"] = top_p
+        if min_p is not None:
+            request["min_p"] = min_p
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
+        if repeat_penalty is not None:
+            request["repeat_penalty"] = repeat_penalty
+        if seed is not None:
+            request["seed"] = seed
+        if stop is not None:
+            request["stop"] = list(stop)
+        if json_schema is not None:
+            request["json_schema"] = dict(json_schema)
+        if grammar is not None:
+            request["grammar"] = grammar
+        if reuse_cache is not None:
+            request["reuse_cache"] = reuse_cache
+        if extra is not None:
+            request.update(extra)
         payload = json.dumps(request).encode("utf-8")
+
+        raised: list[BaseException] = []
 
         if on_token is None:
             ptr = self._lib.llb_chat_infer(ctypes.c_void_p(self._handle), payload)
         else:
-            def _on_token(piece: bytes, _user: Any) -> None:
-                if piece:
-                    on_token(piece.decode("utf-8", "replace"))
+            def _on_token(piece: bytes, _user: Any) -> int:
+                try:
+                    keep = on_token(piece.decode("utf-8", "replace") if piece else "")
+                except BaseException as exc:  # noqa: BLE001 - see below
+                    # An exception must not propagate through the C frame: ctypes would
+                    # print it and return 0, so the model would keep generating for a
+                    # consumer that has already failed. Stop, then re-raise once the
+                    # native call has returned.
+                    raised.append(exc)
+                    return 1
+                # Only an explicit False cancels. `not None` is True in Python, so
+                # testing truthiness here would cancel every callback that just prints.
+                return 1 if keep is False else 0
 
             cb = TOKEN_CB(_on_token)  # kept alive across the call by this local
             ptr = self._lib.llb_chat_infer_stream(
                 ctypes.c_void_p(self._handle), payload, cb, None
             )
 
-        response = json.loads(take_string(self._lib, ptr) or "{}")
+        # Take the string first: the core allocated it whatever the callback did, and
+        # raising before this point would leak it.
+        raw = take_string(self._lib, ptr)
+        if raised:
+            raise raised[0]
+
+        response = json.loads(raw or "{}")
         if response.get("type") == "error":
             err = response.get("error") or {}
             raise ModelError(err.get("code", "UNKNOWN"), err.get("message", ""))
         return response
+
+    def count_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Iterable[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Count the tokens a message list will occupy, without generating anything.
+
+        Returns ``{"tokens": N, "n_ctx": M}`` -- both, because the number only means
+        something against the window it has to fit in.
+
+        Counting needs the model's vocabulary *and* its parsed chat template, neither
+        of which a binding holds, which is why this is an ABI call and not arithmetic
+        done here. It decodes nothing and does not touch the KV cache, so it is safe
+        to call between two inferences.
+        """
+        self._check_open()
+
+        request: dict[str, Any] = {"messages": list(messages)}
+        if tools is not None:
+            request["tools"] = list(tools)
+
+        ptr = self._lib.llb_count_tokens(
+            ctypes.c_void_p(self._handle), json.dumps(request).encode("utf-8")
+        )
+        result = json.loads(take_string(self._lib, ptr) or "{}")
+        if result.get("type") == "error":
+            err = result.get("error") or {}
+            raise ModelError(err.get("code", "UNKNOWN"), err.get("message", ""))
+        return result
+
+    # -- KV cache ----------------------------------------------------------
+
+    def _cache(self, op: str) -> dict[str, Any]:
+        self._check_open()
+        ptr = self._lib.llb_chat_cache(
+            ctypes.c_void_p(self._handle), json.dumps({"op": op}).encode("utf-8")
+        )
+        result = json.loads(take_string(self._lib, ptr) or "{}")
+        if result.get("type") == "error":
+            err = result.get("error") or {}
+            raise ModelError(err.get("code", "UNKNOWN"), err.get("message", ""))
+        return result
+
+    def cache_status(self) -> dict[str, Any]:
+        """What the engine's KV cache currently holds. Changes nothing.
+
+        Returns ``{"tokens": N, "n_ctx": M}`` -- both, because the number only means
+        something against the window it has to fit in.
+        """
+        return self._cache("status")
+
+    def clear_cache(self) -> dict[str, Any]:
+        """Drop the KV cache, freeing its memory and forgetting the sequence.
+
+        Returns the state *afterwards*, which is always ``{"tokens": 0, ...}``, so a
+        caller can assert the release happened rather than trust that it did.
+
+        Prefix reuse is right for a conversation that appends and wrong when a chat
+        moves to unrelated work: the old conversation keeps occupying context memory,
+        and two tenants sharing a handle would share a cache. Passing
+        ``reuse_cache=False`` on the next inference also clears, but only as a side
+        effect of doing work -- no help when the point is to release memory now, or to
+        prove the cache is empty before handing the handle on.
+        """
+        return self._cache("clear")
 
     # -- LoRA adapters -----------------------------------------------------
 
@@ -297,6 +458,10 @@ class Embedder:
         with Embedder("bge-reranker.gguf", pooling="rank") as rr:
             for hit in rr.rerank("capital of France?", docs):
                 print(hit["index"], hit["score"])
+
+    ``pooling``, ``n_ctx`` and ``n_batch`` are omitted from the request when left
+    unset, and the model's default applies. The values are documented once, on
+    ``llb_embed_create`` in ``llamabridge.h``, and are not restated here.
     """
 
     def __init__(
@@ -304,8 +469,8 @@ class Embedder:
         gguf_path: str,
         *,
         pooling: str | None = None,
-        n_ctx: int = 0,
-        n_batch: int = 512,
+        n_ctx: int | None = None,
+        n_batch: int | None = None,
         on_event: Callable[[str], None] | None = None,
     ) -> None:
         self._lib = load()
@@ -322,15 +487,21 @@ class Embedder:
         # pointer for the life of the handle.
         self._event_cb = EVENT_CB(_on_event)
 
-        config: dict[str, Any] = {"n_batch": n_batch}
+        config: dict[str, Any] = {}
         if pooling is not None:
             config["pooling"] = pooling
-        if n_ctx:
+        if n_ctx is not None:
             config["n_ctx"] = n_ctx
+        if n_batch is not None:
+            config["n_batch"] = n_batch
+        # Same rule as Chat: no keys means send NULL, not "{}". A binding that
+        # restated the core's default here would pin the old value the day the core
+        # moved it -- and Go, sending nothing, would follow while Python did not.
+        config_json = json.dumps(config).encode("utf-8") if config else None
 
         handle = self._lib.llb_embed_create(
             str(gguf_path).encode("utf-8"),
-            json.dumps(config).encode("utf-8"),
+            config_json,
             self._event_cb,
             None,
         )

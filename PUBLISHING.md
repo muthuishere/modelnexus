@@ -21,6 +21,29 @@ with no library inside them.
 **Do not delete the `natives-*` prerelease.** Go users resolve their runtime library from it at
 first use via `modelnexus.Fetch()`, so it is a runtime dependency, not merely a build input.
 
+## Status of 0.2.0
+
+**Nothing is publishable until the natives are re-staged.** The assets on `natives-b9371` are
+the **0.1.0** bridge — 14 symbols. 0.2.0 adds `llb_count_tokens`, `llb_chat_cache` and
+`llb_last_error`, and a published binding against those assets fails at load with a missing
+symbol. Verified by downloading the staged asset and reading its symbol table.
+
+`natives.yml` runs on a push to `main` touching `core/**`, so merging the change re-stages them.
+It clobbers the same `natives-b9371` release, which is safe here because 0.2.0's exports are a
+**superset** of 0.1.0's — an existing 0.1.0 consumer that fetches afterwards still finds every
+symbol it needs. That is luck, not design: the natives release is keyed on the llama.cpp tag
+alone (ADR-0004) while the bridge moves independently, so a future release that *removes* a
+symbol would break old consumers silently. The Go client cache is now keyed on both, but the
+release itself is not.
+
+| leg | state |
+|---|---|
+| **Go** | Ready. Needs no credential — it is a tag push using `github.token`. |
+| **npm** | Blocked on owner-only registry setup (below). No `NPM_TOKEN` secret exists. |
+| **PyPI** | Blocked on owner-only registry setup (below). No `PYPI_API_TOKEN` secret exists. |
+
+`ENABLE_GO`, `ENABLE_NPM`, `ENABLE_PYPI` are all `true`. The repo has **zero secrets**.
+
 ## Status of 0.1.0
 
 | leg | state |
