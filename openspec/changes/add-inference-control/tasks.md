@@ -16,45 +16,49 @@
 
 ## 1. ABI signature changes — take both together, while they are free
 
-- [ ] `llb_token_cb` returns `int`; non-zero stops generation. Header comment states the
+- [x] `llb_token_cb` returns `int`; non-zero stops generation. Header comment states the
       contract and that zero means continue.
-- [ ] `llb_chat_create` takes a `config_json` parameter (`n_ctx`, `n_batch`, `n_seq_max`), NULL
+- [x] `llb_chat_create` takes a `config_json` parameter (`n_ctx`, `n_batch`, `n_seq_max`), NULL
       ⇒ today's defaults. Mirror `llb_embed_create`'s shape exactly.
-- [ ] Bump `LLB_BRIDGE_VERSION`; both changes are breaking and must be visible through
+- [x] Bump `LLB_BRIDGE_VERSION`; both changes are breaking and must be visible through
       `llb_version`.
-- [ ] CHANGELOG `## Unreleased` — say plainly that these break, and what a caller does about it.
+- [x] CHANGELOG `## Unreleased` — say plainly that these break, and what a caller does about it.
 
 ## 2. Prefix reuse + cancellation — ONE unit
 
 They ship together because abort-without-rollback plus prefix reuse is a silent correctness
 bug, not a slow path.
 
-- [ ] `llb_chat` retains the resident token sequence.
-- [ ] Longest-common-prefix match; `llama_memory_seq_rm(mem, seq, n, -1)`; decode only the tail.
-- [ ] Replace the unconditional `llama_memory_clear` at `llamabridge.cpp:339`.
-- [ ] `"reuse_cache": false` clears first — identical behaviour to a fresh engine.
-- [ ] Cancellation rolls the cache back to the prompt boundary and truncates the retained
+- [x] `llb_chat` retains the resident token sequence.
+- [x] Longest-common-prefix match; `llama_memory_seq_rm(mem, seq, n, -1)`; decode only the tail.
+- [x] Replace the unconditional `llama_memory_clear` at `llamabridge.cpp:339`.
+- [x] `"reuse_cache": false` clears first — identical behaviour to a fresh engine.
+- [x] Cancellation rolls the cache back to the prompt boundary and truncates the retained
       sequence to match.
-- [ ] `"finish_reason": "cancelled"` with the partial text and honest usage counts.
-- [ ] C-level test: same conversation with reuse on and off, same seed ⇒ identical text.
-- [ ] C-level test: cancel mid-generation, then a different request ⇒ correct answer.
+- [x] `"finish_reason": "cancelled"` with the partial text and honest usage counts.
+- [x] C-level test: same conversation with reuse on and off, same seed ⇒ identical text.
+- [x] C-level test: cancel mid-generation, then a different request ⇒ correct answer.
 
 ## 3. Constrained output
 
-- [ ] `json_schema` on the request → `inputs.json_schema` → `COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT`.
-- [ ] `grammar` on the request → `inputs.grammar` → `COMMON_GRAMMAR_TYPE_USER` (**not**
-      prefilled).
-- [ ] Stop hardcoding `COMMON_GRAMMAR_TYPE_TOOL_CALLS` at `llamabridge.cpp:381`; map by source.
-- [ ] Both fields present ⇒ a stable error code, no generation.
-- [ ] Parse before returning, so fenced-but-conformant output reaches the caller as JSON.
-- [ ] Test asserts the content **parses** and matches the schema — not that it contains the
+- [x] `json_schema` on the request → `inputs.json_schema` → `COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT`.
+- [x] `grammar` on the request → installed AFTER `common_chat_templates_apply` and typed
+      `COMMON_GRAMMAR_TYPE_USER` (**not** prefilled). NOTE: setting `inputs.grammar` does
+      NOT work on the jinja path — upstream assigns it (`common/chat.cpp:2354`), validates it
+      (`:2413`), and then every format handler rebuilds `data.grammar` from scratch, so a
+      caller's GBNF is silently discarded. We install it over `cparams.grammar` afterwards
+      and clear the triggers/laziness that belonged to the grammar it replaced.
+- [x] Stop hardcoding `COMMON_GRAMMAR_TYPE_TOOL_CALLS` at `llamabridge.cpp:381`; map by source.
+- [x] Both fields present ⇒ a stable error code, no generation.
+- [x] Parse before returning, so fenced-but-conformant output reaches the caller as JSON.
+- [x] Test asserts the content **parses** and matches the schema — not that it contains the
       field names. A substring check cannot see the fence.
 
 ## 4. Token counting
 
-- [ ] `llb_count_tokens(chat, request_json)` → `{"tokens": N, "n_ctx": M}`.
-- [ ] No context decode, no cache mutation. Test asserts the cache is untouched.
-- [ ] Header documents the ownership rule like every other returned string.
+- [x] `llb_count_tokens(chat, request_json)` → `{"tokens": N, "n_ctx": M}`.
+- [x] No context decode, no cache mutation. Test asserts the cache is untouched.
+- [x] Header documents the ownership rule like every other returned string.
 
 ## 5. Bindings — all five, per ADR-0002 parity
 
@@ -66,16 +70,16 @@ transliteration.
 - [ ] **Python** — callback returns `False`, or raises. Same four capabilities.
 - [ ] **JS** — callback returns `false`. Same four.
 - [ ] **C#** — callback returns `false`; a signalled `CancellationToken` also stops. Same four.
-- [ ] No Java binding (ADR-0006).
+- [x] No Java binding (ADR-0006).
 - [ ] Cross-binding agreement test: identical schema-constrained output and identical token
       counts across all four, the way the rerank scores already agree byte-for-byte.
 
 ## 6. Docs
 
-- [ ] Header comments carry the contracts, including the two that are non-obvious: the callback
+- [x] Header comments carry the contracts, including the two that are non-obvious: the callback
       return value, and that reuse is on by default.
-- [ ] `CHANGELOG.md` under `## Unreleased`, written as what a user gets.
-- [ ] Name what is NOT done and where it is tracked: slots and continuous batching (ADR-0008
+- [x] `CHANGELOG.md` under `## Unreleased`, written as what a user gets.
+- [x] Name what is NOT done and where it is tracked: slots and continuous batching (ADR-0008
       D6), cache eviction (task 0), session save/restore, logprobs, multimodal.
 
 ## 7. Not in this change — tracked, not dropped
