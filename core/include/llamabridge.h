@@ -60,6 +60,12 @@ typedef void (*llb_event_cb)(const char* event, void* user_data);
 /*   0        continue generating                                      */
 /*   non-zero STOP. Generation ends before the next token is decoded.  */
 /*                                                                     */
+/* A callback MUST NOT let a host-language exception escape into the     */
+/* core. The bridge is C++ with its own unwinding, and a managed or      */
+/* interpreted exception crossing this frame is undefined behaviour.     */
+/* Catch it, return non-zero to stop, and re-raise after the call        */
+/* returns — the cancellation path is exactly the mechanism for this.    */
+/*                                                                       */
 /* Cancelling is a RESULT, not an error: the call still returns a       */
 /* complete response carrying the text produced so far, honest usage    */
 /* counts, and "finish_reason": "cancelled".                           */
