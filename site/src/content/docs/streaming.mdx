@@ -27,7 +27,7 @@ print(r["usage"]["completion_tokens"])
 <TabItem label="JavaScript">
 ```js
 const r = chat.infer(request, (piece) => process.stdout.write(piece))
-console.log(r.usage.completion_tokens)
+console.log(r.usage.completionTokens)
 ```
 </TabItem>
 </Tabs>
@@ -78,7 +78,7 @@ const r = chat.infer(request, () => {
   seen++
   return seen >= 8 ? false : undefined
 })
-// r.finish_reason === 'cancelled', seen === 8, r.usage.completion_tokens === 8
+// r.finishReason === 'cancelled', seen === 8, r.usage.completionTokens === 8
 ```
 </TabItem>
 </Tabs>
@@ -107,8 +107,8 @@ if r["finish_reason"] == "cancelled":
 </TabItem>
 <TabItem label="JavaScript">
 ```js
-if (r.finish_reason === 'cancelled') {
-  console.log(`stopped after ${r.usage.completion_tokens} tokens:`, r.text)
+if (r.finishReason === 'cancelled') {
+  console.log(`stopped after ${r.usage.completionTokens} tokens:`, r.text)
 }
 ```
 </TabItem>

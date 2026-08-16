@@ -30,7 +30,7 @@ try {
       messages: [{ role: 'user', content: 'List the planets of the solar system, one per line.' }],
       temperature: 0.0,
       seed: 42,
-      max_tokens: maxTokens,
+      maxTokens: maxTokens,
     },
     (piece) => {
       process.stdout.write(piece);
@@ -50,15 +50,15 @@ try {
 // is what was really produced, and the usage counts are the tokens you were really
 // charged for. Nothing threw above, precisely because nothing went wrong.
 console.log();
-console.log('finish_reason:', reply.finish_reason);
-console.log('cancelled:    ', reply.finish_reason === 'cancelled');
+console.log('finishReason:', reply.finishReason);
+console.log('cancelled:    ', reply.finishReason === 'cancelled');
 console.log(
-  `usage:         ${reply.usage.prompt_tokens} prompt + ${reply.usage.completion_tokens} ` +
+  `usage:         ${reply.usage.promptTokens} prompt + ${reply.usage.completionTokens} ` +
     `completion (asked for up to ${maxTokens})`,
 );
 console.log(`pieces seen:   ${seen}, response text length: ${reply.text.length} bytes`);
 
-if (reply.finish_reason !== 'cancelled') {
+if (reply.finishReason !== 'cancelled') {
   console.error('expected the callback to have stopped generation');
   process.exit(1);
 }

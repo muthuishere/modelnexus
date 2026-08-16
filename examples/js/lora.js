@@ -43,7 +43,7 @@ try {
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.0,
       seed: 3,
-      max_tokens: 60,
+      maxTokens: 60,
       // Each call must be provably independent, or the previous call's KV prefix —
       // computed under a different adapter set — could be reused underneath it.
       reuseCache: false,

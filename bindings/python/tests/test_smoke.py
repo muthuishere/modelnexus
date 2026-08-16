@@ -126,6 +126,31 @@ def test_no_config_still_loads():
         assert c.count_tokens(CAPITAL)["n_ctx"] > 0
 
 
+def test_a_misspelled_parameter_is_rejected_before_anything_is_sent(chat):
+    # `max_token` -- singular -- used to be marshalled, sent, ignored by the core, and
+    # the call succeeded on the default 256. Go would not compile it; Python must not
+    # accept it. The name has to appear in the message or the caller is still hunting.
+    before = chat.cache_status()["tokens"]
+    with pytest.raises(TypeError, match="max_token"):
+        chat.infer(CAPITAL, max_token=64)
+    # Nothing reached the core: the KV cache is exactly where it was.
+    assert chat.cache_status()["tokens"] == before
+
+
+def test_extra_reaches_the_wire_unchanged(chat):
+    # The escape hatch ADR-0002 requires: a core parameter this binding has not named
+    # costs no binding change. A dict, not **kwargs, because a dict cannot be typed by
+    # accident. If `extra` were dropped the core would never see the key -- an unknown
+    # one is ignored, so assert with a key the core acts on instead.
+    r = chat.infer(CAPITAL, seed=42, temperature=0.0, extra={"max_tokens": 4})
+    assert r["usage"]["completion_tokens"] <= 4
+
+    # And an unknown key still crosses, rather than being filtered against a list the
+    # binding would have to keep in step with the core.
+    r2 = chat.infer(CAPITAL, max_tokens=8, seed=42, temperature=0.0, extra={"mirostat": 2})
+    assert r2["type"] == "assistant_text"
+
+
 def test_count_tokens_reports_a_count_and_the_window(chat):
     counted = chat.count_tokens(CAPITAL)
     assert counted["type"] == "token_count"
@@ -302,6 +327,45 @@ def test_cache_on_a_closed_chat_is_rejected():
         with pytest.raises(mx.ModelError) as excinfo:
             call()
         assert excinfo.value.code == "ENGINE_CLOSED"
+
+
+# ---------------------------------------------------------------------------
+# Create config. Asserted through the event the CORE emits, which is what the
+# parity gate reads -- self-reporting what a binding "meant to send" would pass
+# while the wire disagreed.
+# ---------------------------------------------------------------------------
+
+
+def created_config(cls, **kw) -> str:
+    seen: list[str] = []
+
+    def on_event(e: str) -> None:
+        if e.startswith("create_config:"):
+            seen.append(e[len("create_config:"):])
+
+    engine = cls(model(), on_event=on_event, **kw)
+    engine.close()
+    assert seen, "the core did not report a create config"
+    return seen[-1]
+
+
+def test_an_embedder_with_no_options_sends_no_config():
+    # It used to send {"n_batch":512} while Go sent nothing -- same core, same intent,
+    # different request. Harmless only until the core moves the default, at which
+    # point Python would pin the old value and Go would follow the new one.
+    assert json.loads(created_config(mx.Embedder)) is None
+
+
+def test_an_embedder_sends_only_what_was_asked_for():
+    assert json.loads(created_config(mx.Embedder, pooling="mean")) == {"pooling": "mean"}
+
+
+def test_a_chat_with_no_options_sends_no_config():
+    assert json.loads(created_config(mx.Chat)) is None
+
+
+def test_a_chat_sends_only_what_was_asked_for():
+    assert json.loads(created_config(mx.Chat, n_ctx=2048)) == {"n_ctx": 2048}
 
 
 def lora_pair() -> tuple[str, str]:

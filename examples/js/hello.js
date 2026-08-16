@@ -24,19 +24,20 @@ setLogLevel(LogLevel.ERROR);
 // read.
 const chat = new Chat(path);
 try {
-  // Generation parameters travel inside the request object under the core's own names,
-  // so a new one in the core needs no change in this binding.
+  // Generation parameters travel inside the request object. They are camelCase here
+  // and snake_case on the wire; the boundary converts every key, so a new parameter in
+  // the core needs no change in this binding.
   const reply = chat.infer({
     messages: [{ role: 'user', content: 'Name the capital of France. Answer in one word.' }],
     temperature: 0.0,
     seed: 42,
-    max_tokens: 64,
+    maxTokens: 64,
   });
 
   console.log('answer:', reply.text);
   console.log(
-    `tokens: ${reply.usage.prompt_tokens} prompt + ${reply.usage.completion_tokens} completion, ` +
-      `finish_reason=${reply.finish_reason}`,
+    `tokens: ${reply.usage.promptTokens} prompt + ${reply.usage.completionTokens} completion, ` +
+      `finishReason=${reply.finishReason}`,
   );
 } finally {
   // The handle owns native memory. Nothing here is reclaimed by the garbage collector.

@@ -472,8 +472,22 @@ public sealed class Embedder : IDisposable
     private readonly List<string> _events = new();
     private readonly Native.StringCallback _eventCallback;
 
+    /// <summary>Load a GGUF model for embedding or reranking.</summary>
+    /// <param name="ggufPath">Path to the GGUF model.</param>
+    /// <param name="pooling">
+    /// How token vectors are reduced to one vector per input. <see cref="Pooling.Rank"/>
+    /// is required for <see cref="Rerank"/>; <see cref="Pooling.Default"/> leaves the
+    /// choice to the model.
+    /// </param>
+    /// <param name="nCtx">Context size; 0 leaves it to the core's default.</param>
+    /// <param name="nBatch">
+    /// Caps how many tokens one input may have; 0 leaves it to the core's default.
+    /// The binding states no number of its own -- a default restated here is a second
+    /// place it can drift from.
+    /// </param>
+    /// <param name="onEvent">Receives the core's lifecycle events during load.</param>
     public Embedder(string ggufPath, Pooling pooling = Pooling.Default,
-                    int nCtx = 0, int nBatch = 512, Action<string>? onEvent = null)
+                    int nCtx = 0, int nBatch = 0, Action<string>? onEvent = null)
     {
         _eventCallback = (ptr, _) =>
         {
@@ -482,12 +496,14 @@ public sealed class Embedder : IDisposable
             onEvent?.Invoke(text);
         };
 
-        var config = new Dictionary<string, object?> { ["n_batch"] = nBatch };
+        var config = new Dictionary<string, object?>();
         if (pooling != Pooling.Default) config["pooling"] = pooling.ToString().ToLowerInvariant();
         if (nCtx > 0) config["n_ctx"] = nCtx;
+        if (nBatch > 0) config["n_batch"] = nBatch;
+        // Nothing set means NULL, not "{}" -- same rule as Chat above.
+        var configJson = config.Count > 0 ? JsonSerializer.Serialize(config, Json.Options) : null;
 
-        _handle = Native.EmbedCreate(ggufPath, JsonSerializer.Serialize(config, Json.Options),
-                                     _eventCallback, IntPtr.Zero);
+        _handle = Native.EmbedCreate(ggufPath, configJson, _eventCallback, IntPtr.Zero);
         if (_handle == IntPtr.Zero)
         {
             var detail = _events.Count > 0 ? string.Join("; ", _events) : "unknown reason";

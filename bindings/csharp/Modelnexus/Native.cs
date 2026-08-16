@@ -127,9 +127,10 @@ internal static partial class Native
     [DllImport(Lib, EntryPoint = "llb_chat_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ChatDestroy(IntPtr chat);
 
+    // configJson is nullable here for the same reason as ChatCreate above.
     [DllImport(Lib, EntryPoint = "llb_embed_create", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr EmbedCreate([MarshalAs(UnmanagedType.LPUTF8Str)] string ggufPath,
-                                              [MarshalAs(UnmanagedType.LPUTF8Str)] string configJson,
+                                              [MarshalAs(UnmanagedType.LPUTF8Str)] string? configJson,
                                               StringCallback? eventCb, IntPtr userData);
 
     [DllImport(Lib, EntryPoint = "llb_embed", CallingConvention = CallingConvention.Cdecl)]

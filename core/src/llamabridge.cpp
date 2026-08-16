@@ -851,6 +851,13 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     cparams.n_ctx   = 4096;
     cparams.n_batch = 512;
 
+    /* Echo the configuration EXACTLY as received, before parsing. The parity
+       gate compares this across bindings: two bindings can send different
+       configs and still behave identically today, then diverge the moment a
+       core default moves. Observing what was actually sent is stronger
+       evidence than asking a binding what it thinks it sends. */
+    emit(chat, (std::string("create_config:") + (config_json && *config_json ? config_json : "null")).c_str());
+
     /* 0.2.0: optional configuration, mirroring llb_embed_create. NULL / "" /
        an unparseable object all fall back to the defaults above, which are
        exactly what this function used before the parameter existed — so a
@@ -1201,6 +1208,9 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     e->pooling    = parse_pooling(cfg.value("pooling", std::string()));
 
     emit_raw(event_cb, user_data, "create_start");
+    /* Same echo as llb_chat_create — see the note there. */
+    emit_raw(event_cb, user_data,
+             (std::string("create_config:") + (config_json && *config_json ? config_json : "null")).c_str());
 
     ensure_log_sink();
     llama_backend_init();

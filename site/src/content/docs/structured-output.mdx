@@ -14,7 +14,7 @@ is not merely unlikely, it has no probability at all.
 ```go
 req := modelnexus.Request{
 	Messages: []modelnexus.Message{{Role: "user", Content: "Describe Paris."}},
-	JSONSchema: map[string]any{        // a map, or any struct that marshals to a schema
+	JSONSchema: map[string]any{        // see the Go warning below before using a map
 		"type": "object",
 		"properties": map[string]any{
 			"city":       map[string]any{"type": "string"},
@@ -61,6 +61,36 @@ const value = JSON.parse(r.text)   // never throws
 ```
 </TabItem>
 </Tabs>
+
+:::caution[Go: do not build a schema from `map[string]any`]
+`encoding/json` **sorts map keys**, so a schema written as a map reaches the model with its
+properties reordered. Under grammar-constrained decoding **property order is load-bearing** —
+the model commits to fields in the order the grammar allows, so a field it must produce first
+is decided before it has seen the ones that would inform it.
+
+This is not theoretical. The same prompt with the same seed returned `rating: 2` in Go and
+`rating: 3` in Python and JavaScript, because Go had moved `rating` ahead of `sentiment`.
+
+Use `json.RawMessage`, which preserves the order you wrote:
+
+```go
+schema := json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "sentiment": {"type": "string", "enum": ["positive","negative","mixed"]},
+    "rating":    {"type": "integer"}
+  },
+  "required": ["sentiment", "rating"],
+  "additionalProperties": false
+}`)
+
+resp, err := chat.Infer(modelnexus.Request{Messages: msgs, JSONSchema: schema})
+```
+
+Python and JavaScript preserve insertion order already, and the JavaScript binding passes a
+caller-supplied schema through its camelCase converter **untouched** for the same reason: the
+property names and their order are the contract you are asking the model to satisfy.
+:::
 
 `additionalProperties: false` is honoured. So is `required`. So are the types.
 

@@ -47,7 +47,7 @@ try {
 
   // Grow the conversation and watch the count against the window. This is the loop a
   // real agent runs before every call, to decide whether to trim history.
-  console.log('messages   tokens   n_ctx   used');
+  console.log('messages   tokens    nCtx   used');
   for (let i = 0; i < 5; i++) {
     const { tokens, nCtx } = chat.countTokens({ messages });
     console.log(

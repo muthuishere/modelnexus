@@ -1,5 +1,36 @@
 using Modelnexus;
 
+// --create-config <model> : report the config this binding actually sends at
+// engine creation, observed through the core's create_config: event, in the
+// format core/tests/agreement.sh compares across bindings.
+//
+// C# is not published (ADR-0007) but must stay at parity, and it was the ONE
+// binding the parity gate could not see — which is exactly where an Embedder
+// that unconditionally sent {"n_batch":512} survived unnoticed.
+if (args.Length >= 2 && args[0] == "--create-config")
+{
+    var m = args[1];
+    string seen = "<none>";
+    void Capture(string e)
+    {
+        const string prefix = "create_config:";
+        if (e.StartsWith(prefix, StringComparison.Ordinal)) seen = e[prefix.Length..];
+    }
+    void Probe(string label, Func<IDisposable> open)
+    {
+        seen = "<none>";
+        using (open()) { }
+        Console.WriteLine($"{label}={seen}");
+    }
+
+    Probe("chat-none",  () => new Chat(m, onEvent: Capture));
+    Probe("chat-ctx",   () => new Chat(m, nCtx: 2048, onEvent: Capture));
+    Probe("chat-full",  () => new Chat(m, nCtx: 2048, nBatch: 256, nSeqMax: 1, onEvent: Capture));
+    Probe("embed-none", () => new Embedder(m, onEvent: Capture));
+    Probe("embed-pool", () => new Embedder(m, pooling: Pooling.Mean, onEvent: Capture));
+    return 0;
+}
+
 var model = Environment.GetEnvironmentVariable("MODELNEXUS_MODEL")!;
 var reranker = Environment.GetEnvironmentVariable("MODELNEXUS_RERANKER")!;
 
@@ -54,3 +85,5 @@ using (var rr = new Embedder(reranker, Pooling.Rank, nCtx: 512))
         Console.Error.WriteLine($"  {hit.Score,+8:F3}  [{hit.Index}] {docs[hit.Index][..Math.Min(40, docs[hit.Index].Length)]}");
 }
 Console.Error.WriteLine("ALL OK");
+
+return 0;

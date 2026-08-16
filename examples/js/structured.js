@@ -38,12 +38,13 @@ let reply;
 try {
   reply = chat.infer({
     messages: [{ role: 'user', content: review }],
-    // camelCase here, json_schema on the wire: the binding renames the fields it names
-    // and passes everything else through untouched.
+    // camelCase here, json_schema on the wire. The binding converts every key it
+    // sends -- except the schema's own property names, which are yours and describe
+    // what you asked the model for.
     jsonSchema: schema,
     temperature: 0.0,
     seed: 7,
-    max_tokens: 120,
+    maxTokens: 120,
   });
 } finally {
   chat.close();
@@ -64,5 +65,5 @@ console.log('sentiment:', parsed.sentiment);
 console.log('rating:   ', parsed.rating);
 console.log('topics:   ', parsed.topics);
 console.log(
-  `(parsed from ${reply.text.length} bytes of model output, finish_reason=${reply.finish_reason})`,
+  `(parsed from ${reply.text.length} bytes of model output, finishReason=${reply.finishReason})`,
 );

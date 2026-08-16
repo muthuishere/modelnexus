@@ -75,7 +75,30 @@ type Request struct {
 	// guaranteed to parse as JSON: the grammar llama.cpp derives from a schema
 	// deliberately permits a ```json fence, and the core strips it before returning.
 	//
-	// Any value that marshals to a JSON Schema object works -- a map, or a struct.
+	// Any value that marshals to a JSON Schema object works -- but PREFER
+	// json.RawMessage, and read the next paragraph before reaching for a map.
+	//
+	// encoding/json SORTS map keys, so a schema built as map[string]any reaches the
+	// model with its properties in alphabetical order. Under grammar-constrained
+	// decoding property order is load-bearing: the model must emit the fields in the
+	// order the grammar allows, so it commits to a "rating" before it has reasoned out
+	// a "sentiment" it would otherwise have written first. This is not theoretical --
+	// the same prompt at the same seed returned rating 2 from Go and rating 3 from
+	// Python and JS, purely because Go had reordered the two properties. The output
+	// still parses, still validates, and is quietly a different answer.
+	//
+	// json.RawMessage preserves the order you wrote:
+	//
+	//	JSONSchema: json.RawMessage(`{
+	//	    "type": "object",
+	//	    "properties": {
+	//	        "sentiment": {"type": "string"},
+	//	        "rating":    {"type": "integer"}
+	//	    },
+	//	    "required": ["sentiment", "rating"]
+	//	}`)
+	//
+	// A struct with ordered fields works too; a map does not, and cannot be made to.
 	JSONSchema any `json:"json_schema,omitempty"`
 
 	// Grammar constrains the output to a raw GBNF grammar.
@@ -275,7 +298,7 @@ type Option func(*openConfig)
 type openConfig struct {
 	onEvent func(string)
 	// Context parameters, marshalled to the core's create config. Zero means "not
-	// set" and is omitted, so an Open with no options sends an empty config and the
+	// set" and is omitted, so an Open with no options sends NO config at all and the
 	// core applies exactly the defaults it used before the parameter existed.
 	nCtx, nBatch, nSeqMax int
 }
@@ -285,7 +308,8 @@ func WithEventHandler(fn func(string)) Option {
 	return func(c *openConfig) { c.onEvent = fn }
 }
 
-// WithContextSize sets the engine's context window in tokens. Default 4096.
+// WithContextSize sets the engine's context window in tokens. Unset means the core's
+// default (llb_chat_create in core/include/llamabridge.h states it).
 //
 // This is create-time: it is the size of the KV cache, and it cannot be changed on a
 // live engine.
@@ -293,12 +317,13 @@ func WithContextSize(n int) Option {
 	return func(c *openConfig) { c.nCtx = n }
 }
 
-// WithBatchSize sets the logical batch size. Default 512.
+// WithBatchSize sets the logical batch size. Unset means the core's default.
 func WithBatchSize(n int) Option {
 	return func(c *openConfig) { c.nBatch = n }
 }
 
-// WithMaxSequences reserves room for n concurrent sequences. Default 1.
+// WithMaxSequences reserves room for n concurrent sequences. Unset means the core's
+// default.
 //
 // It has no observable effect today. It is accepted now because it is a create-time
 // parameter -- the one kind that cannot be added later through request JSON -- so
@@ -332,9 +357,18 @@ func Open(ggufPath string, opts ...Option) (*Chat, error) {
 	if cfg.nSeqMax > 0 {
 		config["n_seq_max"] = cfg.nSeqMax
 	}
-	configJSON, err := json.Marshal(config)
-	if err != nil {
-		return nil, fmt.Errorf("modelnexus: could not encode config: %w", err)
+	// No option set means NO config, not an empty object: the ABI's contract is that
+	// a NULL config behaves exactly as it did before the parameter existed, and "" is
+	// how purego spells NULL here. `{}` is a config that happens to say nothing, which
+	// takes a different path through the core and is a different thing to every other
+	// binding.
+	configJSON := ""
+	if len(config) > 0 {
+		encoded, err := json.Marshal(config)
+		if err != nil {
+			return nil, fmt.Errorf("modelnexus: could not encode config: %w", err)
+		}
+		configJSON = string(encoded)
 	}
 
 	chat := &Chat{}
@@ -350,7 +384,7 @@ func Open(ggufPath string, opts ...Option) (*Chat, error) {
 		}
 	})
 
-	handle := llbChatCreate(ggufPath, string(configJSON), eventTrampoline, chat.eventID)
+	handle := llbChatCreate(ggufPath, configJSON, eventTrampoline, chat.eventID)
 	if handle == 0 {
 		defer releaseSink(eventSink, chat.eventID)
 		// NULL is the one place the core signals failure with a null pointer; the

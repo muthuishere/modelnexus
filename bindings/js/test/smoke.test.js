@@ -6,6 +6,9 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { Chat, Embedder, ModelError, version, platformKey } from '../src/index.js';
+// Reached directly rather than through the package entry point: the boundary is
+// testable without a multi-gigabyte GGUF, and it is not public API.
+import { toWire, fromWire } from '../src/wire.js';
 
 // Skip rather than fail without a model: the binding is worth testing on a machine
 // with no multi-gigabyte GGUF sitting around.
@@ -24,18 +27,94 @@ test('platformKey looks like os-arch', () => {
   assert.match(platformKey(), /^(darwin|linux|windows)-(x86_64|aarch64)$/);
 });
 
+describe('the camelCase boundary', () => {
+  test('every request key is converted, not a named few', () => {
+    // The defect this replaced renamed exactly jsonSchema and reuseCache and passed
+    // the rest through, so a request was written half in each convention. A key this
+    // binding has never heard of must convert too, or the next core parameter
+    // reintroduces the split.
+    assert.deepEqual(
+      toWire({ maxTokens: 64, topK: 40, repeatPenalty: 1.1, reuseCache: false, mirostatTau: 5 }),
+      { max_tokens: 64, top_k: 40, repeat_penalty: 1.1, reuse_cache: false, mirostat_tau: 5 },
+    );
+  });
+
+  test('nested request objects are converted too', () => {
+    assert.deepEqual(toWire({ messages: [{ role: 'tool', toolCallId: 'x' }] }), {
+      messages: [{ role: 'tool', tool_call_id: 'x' }],
+    });
+  });
+
+  test('a snake_case request option is REJECTED, never silently ignored', () => {
+    // The decision, pinned: rejected. Every core parameter is reachable by its
+    // camelCase spelling -- including ones this binding has never named -- so no
+    // request exists that a caller can only write in snake_case, which makes a
+    // snake_case key a mistake and nothing else. Ignoring it is the bug being
+    // removed: `max_tokens: 16` used to marshal, reach the core, be ignored, and
+    // leave the call looking like it had worked.
+    assert.throws(
+      () => toWire({ messages: [], max_tokens: 16 }),
+      (e) => e instanceof TypeError && /maxTokens/.test(e.message),
+    );
+    // Nested, and inside an array, on the same rule.
+    assert.throws(
+      () => toWire({ messages: [{ role: 'tool', tool_call_id: 'x' }] }),
+      (e) => e instanceof TypeError && /toolCallId/.test(e.message),
+    );
+  });
+
+  test("a caller's JSON schema is passed through byte for byte", () => {
+    // Its property names are the caller's contract with the model, and its property
+    // ORDER is load-bearing under grammar-constrained decoding. Walking into it would
+    // rewrite the question.
+    const schema = {
+      type: 'object',
+      properties: { max_tokens: { type: 'integer' }, user_name: { type: 'string' } },
+      required: ['max_tokens', 'user_name'],
+      additionalProperties: false,
+    };
+    const wire = toWire({ jsonSchema: schema });
+    assert.equal(wire.json_schema, schema, 'the schema must be the same object, not a copy');
+    assert.deepEqual(Object.keys(wire.json_schema.properties), ['max_tokens', 'user_name']);
+
+    // tools[].function.parameters is the same thing, once per tool.
+    const params = { type: 'object', properties: { part_number: { type: 'string' } } };
+    const tooled = toWire({
+      tools: [{ type: 'function', function: { name: 'lookup', parameters: params } }],
+    });
+    assert.equal(tooled.tools[0].function.parameters, params);
+  });
+
+  test('every response key comes back camelCase', () => {
+    assert.deepEqual(
+      fromWire({
+        type: 'assistant_text',
+        finish_reason: 'stop',
+        tool_calls: [{ id: '1', name: 'f', arguments: '{"a":1}' }],
+        usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+      }),
+      {
+        type: 'assistant_text',
+        finishReason: 'stop',
+        toolCalls: [{ id: '1', name: 'f', arguments: '{"a":1}' }],
+        usage: { promptTokens: 3, completionTokens: 4, totalTokens: 7 },
+      },
+    );
+  });
+});
+
 describe('chat', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
   test('infer returns text and usage', () => {
     const chat = new Chat(MODEL);
     try {
       const r = chat.infer({
         messages: [{ role: 'user', content: 'Reply with exactly: pong' }],
-        max_tokens: 16,
+        maxTokens: 16,
         seed: 1,
       });
       assert.equal(r.type, 'assistant_text');
       assert.ok(r.text.length > 0);
-      assert.ok(r.usage.total_tokens > 0);
+      assert.ok(r.usage.totalTokens > 0);
     } finally {
       chat.close();
     }
@@ -46,11 +125,11 @@ describe('chat', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
     try {
       const pieces = [];
       const r = chat.infer(
-        { messages: [{ role: 'user', content: 'Count: 1 2 3' }], max_tokens: 24, seed: 1 },
+        { messages: [{ role: 'user', content: 'Count: 1 2 3' }], maxTokens: 24, seed: 1 },
         (p) => pieces.push(p),
       );
       assert.ok(pieces.length > 0, 'expected streamed pieces');
-      assert.ok(r.usage.completion_tokens > 0, 'expected usage on the streamed response');
+      assert.ok(r.usage.completionTokens > 0, 'expected usage on the streamed response');
     } finally {
       chat.close();
     }
@@ -62,7 +141,7 @@ describe('chat', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
     const events = [];
     const chat = new Chat(MODEL, { onEvent: (e) => events.push(e) });
     try {
-      chat.infer({ messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 });
+      chat.infer({ messages: [{ role: 'user', content: 'hi' }], maxTokens: 8 });
       assert.ok(events.length > 0);
     } finally {
       chat.close();
@@ -96,13 +175,13 @@ describe('chat', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
     try {
       let seen = 0;
       const r = chat.infer(
-        { messages: [{ role: 'user', content: 'Count: 1 2 3' }], max_tokens: 24, seed: 1 },
+        { messages: [{ role: 'user', content: 'Count: 1 2 3' }], maxTokens: 24, seed: 1 },
         () => {
           seen++;
         },
       );
       assert.ok(seen > 1, 'expected more than one piece');
-      assert.notEqual(r.finish_reason, 'cancelled');
+      assert.notEqual(r.finishReason, 'cancelled');
     } finally {
       chat.close();
     }
@@ -121,7 +200,7 @@ describe('chat', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
 describe('inference control', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
   const ASK_PARIS = {
     messages: [{ role: 'user', content: 'Name the capital of France in one word.' }],
-    max_tokens: 16,
+    maxTokens: 16,
     seed: 42,
     temperature: 0,
   };
@@ -184,7 +263,7 @@ describe('inference control', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' 
       const r = chat.infer(
         {
           messages: [{ role: 'user', content: 'Count slowly from one to fifty in words, one per line.' }],
-          max_tokens: 300,
+          maxTokens: 300,
           seed: 7,
           temperature: 0,
         },
@@ -193,9 +272,9 @@ describe('inference control', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' 
           return seen >= 8 ? false : undefined;
         },
       );
-      assert.equal(r.finish_reason, 'cancelled');
+      assert.equal(r.finishReason, 'cancelled');
       assert.equal(seen, 8, 'generation stopped at the requested token, not later');
-      assert.equal(r.usage.completion_tokens, 8, 'usage must count what was actually generated');
+      assert.equal(r.usage.completionTokens, 8, 'usage must count what was actually generated');
 
       // The proof that the cache rolled back: a DIFFERENT request on the same handle
       // must be correct, uninfluenced by the abandoned partial turn. Without rollback
@@ -212,7 +291,7 @@ describe('inference control', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' 
     try {
       const r = chat.infer({
         messages: [{ role: 'user', content: 'Describe Paris.' }],
-        max_tokens: 120,
+        maxTokens: 120,
         seed: 42,
         temperature: 0,
         jsonSchema: {
@@ -238,7 +317,7 @@ describe('inference control', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' 
     try {
       const r = chat.infer({
         messages: [{ role: 'user', content: 'Pick a colour.' }],
-        max_tokens: 16,
+        maxTokens: 16,
         seed: 42,
         temperature: 0,
         grammar: 'root ::= "red" | "blue"',
@@ -311,6 +390,23 @@ test('a missing model is a typed error', () => {
 });
 
 describe('embeddings', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
+  test('no options sends no config, rather than a default this binding invented', () => {
+    // Observed at the core, not self-reported. This used to send {"n_batch":512}
+    // unasked, which is a default the core owns pinned in a place nobody would look
+    // when the core's own moved.
+    const seen = [];
+    const emb = new Embedder(MODEL, {
+      onEvent: (e) => {
+        if (e.startsWith('create_config:')) seen.push(e.slice('create_config:'.length));
+      },
+    });
+    try {
+      assert.deepEqual(seen, ['null']);
+    } finally {
+      emb.close();
+    }
+  });
+
   test('embed returns unit vectors, one per input', () => {
     const emb = new Embedder(MODEL, { pooling: 'mean', nCtx: 512 });
     try {

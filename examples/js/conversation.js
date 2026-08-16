@@ -59,10 +59,10 @@ function run(reuse) {
         reuseCache: reuse,
         temperature: 0.0,
         seed: 11,
-        max_tokens: 40,
+        maxTokens: 40,
       });
       elapsed.push(Number(process.hrtime.bigint() - start) / 1e6);
-      prompts.push(reply.usage.prompt_tokens);
+      prompts.push(reply.usage.promptTokens);
 
       // Appending the reply is what makes the next prompt a strict extension of this
       // one — exactly the shape prefix reuse can exploit.

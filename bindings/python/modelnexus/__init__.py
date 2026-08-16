@@ -137,7 +137,9 @@ class Chat:
 
     ``n_ctx``, ``n_batch`` and ``n_seq_max`` are fixed when the context is built and
     cannot be changed per request, which is why they live here and every generation
-    parameter lives on :meth:`infer`.
+    parameter lives on :meth:`infer`. Each is omitted from the request when left
+    unset, and the model's default applies -- the values are documented once, on
+    ``llb_chat_create`` in ``llamabridge.h``, and are not restated here.
     """
 
     def __init__(
@@ -200,10 +202,18 @@ class Chat:
         tools: Iterable[Mapping[str, Any]] | None = None,
         tool_choice: str | None = None,
         on_token: Callable[[str], Any] | None = None,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        min_p: float | None = None,
+        max_tokens: int | None = None,
+        repeat_penalty: float | None = None,
+        seed: int | None = None,
+        stop: Sequence[str] | None = None,
         json_schema: Mapping[str, Any] | None = None,
         grammar: str | None = None,
         reuse_cache: bool | None = None,
-        **params: Any,
+        extra: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one turn and return the parsed response.
 
@@ -226,8 +236,14 @@ class Chat:
         sharing one handle. It affects latency, never output.
 
         Generation parameters (``temperature``, ``top_k``, ``top_p``, ``min_p``,
-        ``max_tokens``, ``repeat_penalty``, ``seed``, ``stop``) travel inside the
-        request JSON, so new ones need no change here.
+        ``max_tokens``, ``repeat_penalty``, ``seed``, ``stop``) are named here and
+        omitted from the request when left unset, so the core owns every default.
+
+        A misspelled keyword is a ``TypeError`` from Python itself and nothing is
+        sent. To reach a core parameter this binding has not named yet, pass
+        ``extra={"mirostat": 2}`` -- it goes to the wire unchanged. It is a dict
+        rather than ``**kwargs`` for exactly one reason: a dict cannot be reached by
+        a typo, so an unnamed parameter stays deliberate.
         """
         self._check_open()
 
@@ -236,13 +252,30 @@ class Chat:
             request["tools"] = list(tools)
         if tool_choice is not None:
             request["tool_choice"] = tool_choice
+        if temperature is not None:
+            request["temperature"] = temperature
+        if top_k is not None:
+            request["top_k"] = top_k
+        if top_p is not None:
+            request["top_p"] = top_p
+        if min_p is not None:
+            request["min_p"] = min_p
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
+        if repeat_penalty is not None:
+            request["repeat_penalty"] = repeat_penalty
+        if seed is not None:
+            request["seed"] = seed
+        if stop is not None:
+            request["stop"] = list(stop)
         if json_schema is not None:
             request["json_schema"] = dict(json_schema)
         if grammar is not None:
             request["grammar"] = grammar
         if reuse_cache is not None:
             request["reuse_cache"] = reuse_cache
-        request.update(params)
+        if extra is not None:
+            request.update(extra)
         payload = json.dumps(request).encode("utf-8")
 
         raised: list[BaseException] = []
@@ -425,6 +458,10 @@ class Embedder:
         with Embedder("bge-reranker.gguf", pooling="rank") as rr:
             for hit in rr.rerank("capital of France?", docs):
                 print(hit["index"], hit["score"])
+
+    ``pooling``, ``n_ctx`` and ``n_batch`` are omitted from the request when left
+    unset, and the model's default applies. The values are documented once, on
+    ``llb_embed_create`` in ``llamabridge.h``, and are not restated here.
     """
 
     def __init__(
@@ -432,8 +469,8 @@ class Embedder:
         gguf_path: str,
         *,
         pooling: str | None = None,
-        n_ctx: int = 0,
-        n_batch: int = 512,
+        n_ctx: int | None = None,
+        n_batch: int | None = None,
         on_event: Callable[[str], None] | None = None,
     ) -> None:
         self._lib = load()
@@ -450,15 +487,21 @@ class Embedder:
         # pointer for the life of the handle.
         self._event_cb = EVENT_CB(_on_event)
 
-        config: dict[str, Any] = {"n_batch": n_batch}
+        config: dict[str, Any] = {}
         if pooling is not None:
             config["pooling"] = pooling
-        if n_ctx:
+        if n_ctx is not None:
             config["n_ctx"] = n_ctx
+        if n_batch is not None:
+            config["n_batch"] = n_batch
+        # Same rule as Chat: no keys means send NULL, not "{}". A binding that
+        # restated the core's default here would pin the old value the day the core
+        # moved it -- and Go, sending nothing, would follow while Python did not.
+        config_json = json.dumps(config).encode("utf-8") if config else None
 
         handle = self._lib.llb_embed_create(
             str(gguf_path).encode("utf-8"),
-            json.dumps(config).encode("utf-8"),
+            config_json,
             self._event_cb,
             None,
         )

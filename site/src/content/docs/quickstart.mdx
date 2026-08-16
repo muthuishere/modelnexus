@@ -66,17 +66,17 @@ const chat = new Chat('qwen2.5-1.5b-instruct-q4_k_m.gguf')
 try {
   const r = chat.infer({
     messages: [{ role: 'user', content: 'Name the capital of France in one word.' }],
-    max_tokens: 64,
+    maxTokens: 64,
   })
-  console.log(r.text, r.usage.completion_tokens)
+  console.log(r.text, r.usage.completionTokens)
 } finally {
   chat.close()
 }
 ```
 
-Generation parameters keep their wire names (`max_tokens`, `top_k`, `repeat_penalty`).
-Only `jsonSchema` and `reuseCache` are camelCase, because only those two are named by the
-binding itself.
+Every option is camelCase — `maxTokens`, `topK`, `repeatPenalty`, `jsonSchema`, `reuseCache`
+— and every response field is too. The boundary converts the lot to the core's snake_case and
+back; a snake_case key here is a `TypeError` rather than a silently ignored one.
 </TabItem>
 </Tabs>
 
@@ -134,7 +134,7 @@ json.loads(r["text"])   # does not raise
 ```js
 const r = chat.infer({
   messages: [{ role: 'user', content: 'Describe Paris.' }],
-  max_tokens: 120, seed: 42, temperature: 0,
+  maxTokens: 120, seed: 42, temperature: 0,
   jsonSchema: {
     type: 'object',
     properties: { city: { type: 'string' }, country: { type: 'string' } },

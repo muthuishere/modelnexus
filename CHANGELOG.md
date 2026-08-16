@@ -23,6 +23,45 @@ tells people to depend on the current shape.
   which already worked this way. Chat was previously not configurable at all. **Passing NULL is
   byte-identical to the old behaviour.**
 
+### Breaking — the bindings now agree with each other
+
+Writing the documentation and the examples turned up four places where the bindings only
+*looked* alike. None was a crash. Every one was invisible to a per-binding test suite, because
+each binding was individually correct and they disagreed only with **each other**.
+
+- **JavaScript is camelCase, in and out.** It used to translate exactly two keys, so you wrote
+  `{ jsonSchema, max_tokens }` — two conventions in one object, with no rule to remember it by
+  — and read back `finish_reason` from one method and `nCtx` from another. Now every request
+  option and every response field is camelCase, translated at the boundary by a general
+  converter rather than a rename table. A snake_case key is rejected with a message naming the
+  camelCase spelling, because every core parameter is reachable in camelCase **including ones
+  the binding has never named** (`mirostatTau` → `mirostat_tau`), so a snake_case key can only
+  be a mistake.
+
+  **A JSON Schema you supply is passed through untouched** — its property names, and their
+  order, are the contract you are asking the model to satisfy, not the binding's to rewrite.
+  The same exemption covers `tools[].function.parameters`.
+
+- **Python rejects a parameter it does not recognise.** `infer()` used to forward unknown
+  keyword arguments straight to the wire, so `max_token=16` — singular — was marshalled, sent,
+  ignored by the core, and reported as success using the default 256. It now raises. To reach a
+  core parameter the binding has not named, pass `extra={"mirostat": 2}` — deliberate, and
+  impossible to type by accident.
+
+### Changed
+
+- **Every binding sends only the configuration you set.** Creating an embedder with no options
+  used to send `{"n_batch":512}` from Python, JavaScript and C#, and `{}` from Go, against a
+  core whose own default is 512. Harmless right up until the core's default moves, at which
+  point three bindings would have pinned the old value and one would have followed. The core is
+  now the single home for every default, and the bindings' documentation says "the model's
+  default" instead of restating a number.
+
+- **The parity gate covers creation, not only inference.** It compares what each binding
+  actually **sends** — observed through the core, not self-reported — for five creation
+  intents, and it now includes C#. That is the binding it could not previously see, and it is
+  where an embedder that always sent `{"n_batch":512}` had survived unnoticed.
+
 ### Added
 
 - **Constrained output.** Give a request a `json_schema` and the model can only produce output
