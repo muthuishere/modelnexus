@@ -12,8 +12,20 @@ using (var chat = new Chat(model))
     Console.Error.WriteLine($"infer   : {r.Type} \"{r.Text}\" tokens={r.Usage?.TotalTokens}");
 
     var pieces = new List<string>();
-    chat.Infer(new[] { new Message("user", "Count: 1 2 3") }, maxTokens: 24, seed: 1, onToken: pieces.Add);
+    chat.Infer(new[] { new Message("user", "Count: 1 2 3") }, maxTokens: 24, seed: 1,
+               onToken: p => { pieces.Add(p); return true; });
     Console.Error.WriteLine($"stream  : {pieces.Count} pieces");
+
+    var count = chat.CountTokens(new[] { new Message("user", "Reply with exactly: pong") });
+    Console.Error.WriteLine($"count   : {count.Tokens} tokens of {count.NCtx}");
+
+    // Stopping is a result, not an error: a complete response comes back.
+    var stopped = chat.Infer(new InferRequest
+    {
+        Messages = new[] { new Message("user", "Count slowly from one to fifty in words.") },
+        MaxTokens = 300, Seed = 7, Temperature = 0.0
+    }, onToken: _ => false);
+    Console.Error.WriteLine($"cancel  : {stopped.FinishReason} after {stopped.Usage?.CompletionTokens} tokens");
 
     Console.Error.WriteLine($"loras   : {chat.Loras().Count}");
     try { chat.LoadLora("/nope.gguf"); }

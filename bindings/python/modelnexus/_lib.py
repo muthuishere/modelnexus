@@ -126,11 +126,19 @@ def _bind_signatures(lib: ctypes.CDLL) -> None:
     lib.llb_model_info.argtypes = [ctypes.c_char_p]
     lib.llb_model_info.restype = ctypes.c_void_p
 
-    lib.llb_chat_create.argtypes = [ctypes.c_char_p, EVENT_CB, ctypes.c_void_p]
+    lib.llb_chat_create.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        EVENT_CB,
+        ctypes.c_void_p,
+    ]
     lib.llb_chat_create.restype = ctypes.c_void_p
 
     lib.llb_chat_infer.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     lib.llb_chat_infer.restype = ctypes.c_void_p
+
+    lib.llb_count_tokens.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.llb_count_tokens.restype = ctypes.c_void_p
 
     lib.llb_chat_infer_stream.argtypes = [
         ctypes.c_void_p,
@@ -170,8 +178,10 @@ def _bind_signatures(lib: ctypes.CDLL) -> None:
 
 # void (*)(const char* event, void* user_data)
 EVENT_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
-# void (*)(const char* token_piece, void* user_data)
-TOKEN_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
+# int (*)(const char* token_piece, void* user_data) -- non-zero stops generation.
+# The return type is what makes cancellation possible; a void trampoline here would
+# make every stream run to completion no matter what the consumer wants.
+TOKEN_CB = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
 # void (*)(int level, const char* text, void* user_data)
 LOG_CB = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
 

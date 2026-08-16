@@ -98,11 +98,31 @@ export function modelInfo(ggufPath) {
   return JSON.parse(takeString(l.modelInfo(ggufPath)) || '{}');
 }
 
+/**
+ * Translate the request's camelCase options to the wire names the core reads.
+ *
+ * Only the fields this binding names are renamed; everything else (temperature,
+ * max_tokens, seed, ...) is passed through untouched, so a new generation
+ * parameter in the core needs no change here.
+ *
+ * `reuseCache` is deliberately only sent when the caller set it: the core's
+ * default is true, and writing `reuse_cache: false` for an absent option would
+ * turn the cache off for every existing caller.
+ */
+function toWire(request = {}) {
+  const { jsonSchema, reuseCache, ...rest } = request;
+  const wire = { ...rest };
+  if (jsonSchema !== undefined) wire.json_schema = jsonSchema;
+  if (reuseCache !== undefined) wire.reuse_cache = reuseCache;
+  return wire;
+}
+
 /** A loaded model and its inference context. Call `close()` when done. */
 export class Chat {
   /**
    * @param {string} ggufPath
-   * @param {{onEvent?: (event: string) => void}} [options]
+   * @param {{nCtx?: number, nBatch?: number, nSeqMax?: number,
+   *          onEvent?: (event: string) => void}} [options]
    */
   constructor(ggufPath, options = {}) {
     this._lib = lib();
@@ -119,7 +139,16 @@ export class Chat {
       options.onEvent?.(value);
     }, koffi.pointer(this._lib.StringCallback));
 
-    const handle = this._lib.chatCreate(ggufPath, this._eventCb, null);
+    // A null config is not the same as `{}`: the core reads NULL as "every default",
+    // which is what this constructor did before the parameter existed. Callers who
+    // pass no sizing option must land on that path byte for byte.
+    const config = {};
+    if (options.nCtx !== undefined) config.n_ctx = options.nCtx;
+    if (options.nBatch !== undefined) config.n_batch = options.nBatch;
+    if (options.nSeqMax !== undefined) config.n_seq_max = options.nSeqMax;
+    const configJson = Object.keys(config).length ? JSON.stringify(config) : null;
+
+    const handle = this._lib.chatCreate(ggufPath, configJson, this._eventCb, null);
     if (!handle) {
       koffi.unregister(this._eventCb);
       // NULL is the one place the core signals failure with a null pointer; the
@@ -143,18 +172,35 @@ export class Chat {
    * Generation parameters (temperature, top_k, top_p, min_p, max_tokens,
    * repeat_penalty, seed, stop) go inside `request`, so new ones need no change here.
    *
+   * Constrained output: `jsonSchema` (an object) guarantees the reply parses as JSON
+   * and satisfies the schema, or `grammar` (raw GBNF). Supplying both is an
+   * INVALID_REQUEST error from the core rather than a precedence rule.
+   *
+   * `reuseCache: false` makes the call provably independent of the ones before it.
+   * The default -- reuse -- is a latency property only; output is identical.
+   *
+   * Returning `false` from `onToken` stops generation. That is not an error: the
+   * response comes back complete, with the text produced so far and
+   * `finish_reason: 'cancelled'`.
+   *
    * @param {object} request
-   * @param {(piece: string) => void} [onToken] pass to stream; the full response still returns
+   * @param {(piece: string) => boolean|void} [onToken] pass to stream; the full response still returns
    */
   infer(request, onToken) {
     this._open();
-    const payload = JSON.stringify(request);
+    const payload = JSON.stringify(toWire(request));
 
     if (!onToken) {
       return check(takeString(this._lib.chatInfer(this._handle, payload)));
     }
 
-    const cb = koffi.register((text) => onToken(text ?? ''), koffi.pointer(this._lib.StringCallback));
+    // Only an explicit `false` cancels. The usual callback -- one that writes a piece
+    // and returns nothing -- yields undefined, and treating that falsy value as "stop"
+    // would cancel every stream after its first token.
+    const cb = koffi.register(
+      (text) => (onToken(text ?? '') === false ? 1 : 0),
+      koffi.pointer(this._lib.TokenCallback),
+    );
     try {
       return check(takeString(this._lib.chatInferStream(this._handle, payload, cb, null)));
     } finally {
@@ -162,6 +208,22 @@ export class Chat {
       // event callback -- release it rather than leaking a trampoline per inference.
       koffi.unregister(cb);
     }
+  }
+
+  /**
+   * How many tokens a request's messages will occupy, and the context window they
+   * have to fit in. Decodes nothing and does not disturb the KV cache.
+   *
+   * Lives in the core rather than here because counting needs the model's vocabulary
+   * AND its parsed chat template, and a binding holds neither.
+   *
+   * @param {object} request the same `messages` (and optional `tools`) shape as infer
+   * @returns {{tokens: number, nCtx: number}}
+   */
+  countTokens(request) {
+    this._open();
+    const r = check(takeString(this._lib.countTokens(this._handle, JSON.stringify(toWire(request)))));
+    return { tokens: r.tokens, nCtx: r.n_ctx };
   }
 
   // ---- LoRA ----

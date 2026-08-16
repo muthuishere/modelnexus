@@ -89,11 +89,181 @@ describe('chat', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
     }
   });
 
+  test('a callback returning undefined does not cancel', () => {
+    // The failure this guards against is total: a binding that coerces a falsy
+    // return to "stop" cancels every stream at its first token.
+    const chat = new Chat(MODEL);
+    try {
+      let seen = 0;
+      const r = chat.infer(
+        { messages: [{ role: 'user', content: 'Count: 1 2 3' }], max_tokens: 24, seed: 1 },
+        () => {
+          seen++;
+        },
+      );
+      assert.ok(seen > 1, 'expected more than one piece');
+      assert.notEqual(r.finish_reason, 'cancelled');
+    } finally {
+      chat.close();
+    }
+  });
+
   test('use after close is rejected', () => {
     const chat = new Chat(MODEL);
     chat.close();
     chat.close(); // idempotent
     assert.throws(() => chat.infer({ messages: [] }), (e) => e.code === 'ENGINE_CLOSED');
+  });
+});
+
+// Mirrors core/tests/abi_test.c. Three of these exist because the spike found the
+// failure mode before the code did, and each one is silent rather than loud.
+describe('inference control', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
+  const ASK_PARIS = {
+    messages: [{ role: 'user', content: 'Name the capital of France in one word.' }],
+    max_tokens: 16,
+    seed: 42,
+    temperature: 0,
+  };
+
+  test('no options still loads, and sizing options reach the context', () => {
+    const plain = new Chat(MODEL);
+    try {
+      assert.ok(plain.countTokens(ASK_PARIS).tokens > 0);
+    } finally {
+      plain.close();
+    }
+
+    // n_ctx coming back changed is the proof the config JSON was actually read;
+    // a binding that dropped it would still load and still look fine.
+    const sized = new Chat(MODEL, { nCtx: 2048, nBatch: 256, nSeqMax: 1 });
+    try {
+      assert.equal(sized.countTokens(ASK_PARIS).nCtx, 2048);
+    } finally {
+      sized.close();
+    }
+  });
+
+  test('countTokens reports a plausible count without decoding', () => {
+    const chat = new Chat(MODEL);
+    try {
+      const short = chat.countTokens(ASK_PARIS);
+      assert.ok(short.tokens > 0, 'expected a positive count');
+      assert.ok(short.nCtx > 0, 'expected the context window');
+      assert.ok(short.tokens < short.nCtx);
+
+      const long = chat.countTokens({
+        messages: [{ role: 'user', content: 'word '.repeat(200) }],
+      });
+      assert.ok(long.tokens > short.tokens, 'a longer prompt must count higher');
+    } finally {
+      chat.close();
+    }
+  });
+
+  test('reuseCache on and off produce identical text', () => {
+    // Reuse is a latency feature. Any observable difference in output is a defect,
+    // and this is the assertion that catches it.
+    const chat = new Chat(MODEL);
+    try {
+      const cold = chat.infer({ ...ASK_PARIS, reuseCache: false });
+      const warm = chat.infer(ASK_PARIS);
+      const coldAgain = chat.infer({ ...ASK_PARIS, reuseCache: false });
+
+      assert.equal(warm.text, cold.text, 'reuse changed the output');
+      assert.equal(coldAgain.text, cold.text, 'repeated cold runs are the control');
+    } finally {
+      chat.close();
+    }
+  });
+
+  test('returning false cancels, and the response is a result rather than an error', () => {
+    const chat = new Chat(MODEL);
+    try {
+      let seen = 0;
+      const r = chat.infer(
+        {
+          messages: [{ role: 'user', content: 'Count slowly from one to fifty in words, one per line.' }],
+          max_tokens: 300,
+          seed: 7,
+          temperature: 0,
+        },
+        () => {
+          seen++;
+          return seen >= 8 ? false : undefined;
+        },
+      );
+      assert.equal(r.finish_reason, 'cancelled');
+      assert.equal(seen, 8, 'generation stopped at the requested token, not later');
+      assert.equal(r.usage.completion_tokens, 8, 'usage must count what was actually generated');
+
+      // The proof that the cache rolled back: a DIFFERENT request on the same handle
+      // must be correct, uninfluenced by the abandoned partial turn. Without rollback
+      // the failure is silent -- no error, plausible output, wrong answer.
+      const after = chat.infer(ASK_PARIS);
+      assert.match(after.text, /Paris/, `expected Paris, got: ${after.text}`);
+    } finally {
+      chat.close();
+    }
+  });
+
+  test('a JSON schema produces output that parses and satisfies it', () => {
+    const chat = new Chat(MODEL);
+    try {
+      const r = chat.infer({
+        messages: [{ role: 'user', content: 'Describe Paris.' }],
+        max_tokens: 120,
+        seed: 42,
+        temperature: 0,
+        jsonSchema: {
+          type: 'object',
+          properties: { city: { type: 'string' }, country: { type: 'string' } },
+          required: ['city', 'country'],
+          additionalProperties: false,
+        },
+      });
+      // Parse, never substring-match: upstream's grammar PERMITS a ```json fence, and
+      // a fence is invisible to `.includes()` while making JSON.parse throw.
+      const parsed = JSON.parse(r.text);
+      assert.equal(typeof parsed.city, 'string');
+      assert.equal(typeof parsed.country, 'string');
+      assert.deepEqual(Object.keys(parsed).sort(), ['city', 'country']);
+    } finally {
+      chat.close();
+    }
+  });
+
+  test('a raw GBNF grammar constrains generation', () => {
+    const chat = new Chat(MODEL);
+    try {
+      const r = chat.infer({
+        messages: [{ role: 'user', content: 'Pick a colour.' }],
+        max_tokens: 16,
+        seed: 42,
+        temperature: 0,
+        grammar: 'root ::= "red" | "blue"',
+      });
+      assert.ok(['red', 'blue'].includes(r.text.trim()), `grammar did not constrain: ${r.text}`);
+    } finally {
+      chat.close();
+    }
+  });
+
+  test('a schema and a grammar together is rejected, not silently resolved', () => {
+    const chat = new Chat(MODEL);
+    try {
+      assert.throws(
+        () =>
+          chat.infer({
+            messages: [{ role: 'user', content: 'hi' }],
+            jsonSchema: { type: 'object' },
+            grammar: 'root ::= "x"',
+          }),
+        (e) => e instanceof ModelError && e.code === 'INVALID_REQUEST',
+      );
+    } finally {
+      chat.close();
+    }
   });
 });
 

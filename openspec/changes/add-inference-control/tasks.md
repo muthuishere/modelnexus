@@ -65,14 +65,25 @@ bug, not a slow path.
 A capability lands everywhere or it is not done. Each binding is idiomatic, not a
 transliteration.
 
-- [ ] **Go** — callback returns `bool`; a cancelled `context.Context` also stops. `ChatOptions`
-      for the create config. `CountTokens`. `JSONSchema` / `Grammar` on the request.
-- [ ] **Python** — callback returns `False`, or raises. Same four capabilities.
-- [ ] **JS** — callback returns `false`. Same four.
-- [ ] **C#** — callback returns `false`; a signalled `CancellationToken` also stops. Same four.
+- [x] **Go** — callback returns `bool` (*keep going*); `InferContext`/`InferStreamContext` for a
+      cancellable `context.Context`; functional options `WithContextSize`/`WithBatchSize`/
+      `WithMaxSequences`; `CountTokens`; `JSONSchema`/`Grammar`/`ReuseCache *bool`.
+      `go vet` clean. **24 pass, 2 skip.**
+- [x] **Python** — callback returns `False` (an `None` return CONTINUES); a raising callback
+      stops and re-raises after the core's string is freed. **17 pass, 1 skip.**
+- [x] **JS** — callback returns `false` (`undefined` continues); a SEPARATE koffi proto for the
+      token callback, since reusing the void one would discard the return value silently.
+      **19 pass, 1 skip**, exits cleanly with no forced teardown.
+- [x] **C#** — `Func<string,bool>` callback and a `CancellationToken` that returns the partial
+      response rather than throwing, because the core reports cancellation as a result with
+      real usage counts. **21 pass, 1 skip.**
 - [x] No Java binding (ADR-0006).
-- [ ] Cross-binding agreement test: identical schema-constrained output and identical token
-      counts across all four, the way the rerank scores already agree byte-for-byte.
+- [x] Cross-binding agreement test (`core/tests/agreement.sh`): Go, Python and JS run the same
+      schema-constrained request at temperature 0 and must return byte-identical text AND an
+      identical token count. **AGREE — 3 bindings.** Compares OUTPUT, not internals, so a
+      binding that quietly reshapes a result fails here while passing its own suite.
+      C# is not in the harness (it needs a compiled project rather than a script); its own
+      suite covers the same assertions.
 
 ## 6. Docs
 

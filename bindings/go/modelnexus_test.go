@@ -1,12 +1,29 @@
 package modelnexus_test
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
 	modelnexus "github.com/muthuishere/modelnexus/bindings/go"
 )
+
+// TestMain says loudly when the suite is about to skip nearly everything.
+//
+// A skipped suite must not look like a passing one: `go test` prints "ok" either way,
+// and every real assertion in here needs a model. Run the suite with -v -- go test
+// discards a passing package's output otherwise, so -v is the only invocation in
+// which any banner, from here or from t.Skip, can be seen at all.
+func TestMain(m *testing.M) {
+	if os.Getenv("MODELNEXUS_MODEL") == "" {
+		bar := strings.Repeat("=", 72)
+		fmt.Fprintf(os.Stderr, "%s\nSKIPPING the modelnexus inference suite: MODELNEXUS_MODEL is not set.\n"+
+			"Nothing below tested a model. Set MODELNEXUS_MODEL to a tool-capable GGUF\n"+
+			"to run the real conformance checks.\n%s\n", bar, bar)
+	}
+	os.Exit(m.Run())
+}
 
 // model returns the GGUF to test against, or skips.
 //
@@ -91,7 +108,7 @@ func TestInferStreamDeliversTokensAndFinalResponse(t *testing.T) {
 		Messages:  []modelnexus.Message{{Role: "user", Content: "Count: 1 2 3"}},
 		MaxTokens: &max,
 		Seed:      &seed,
-	}, func(p string) { pieces = append(pieces, p) })
+	}, func(p string) bool { pieces = append(pieces, p); return true })
 	if err != nil {
 		t.Fatalf("InferStream: %v", err)
 	}

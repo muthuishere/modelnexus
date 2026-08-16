@@ -51,6 +51,25 @@ tells people to depend on the current shape.
   conversation. Output is unaffected; this is purely latency. Set `reuse_cache: false` when a
   call must be provably independent.
 
+### Per binding
+
+Each is the language's own idiom, not a transliteration — same behaviour, native shape.
+
+| | stop a stream | cancel natively | create options |
+|---|---|---|---|
+| Go | callback returns `false` | `InferContext` with a `context.Context` | `WithContextSize` / `WithBatchSize` / `WithMaxSequences` |
+| Python | callback returns `False`, or raises | — | `Chat(path, n_ctx=…, n_batch=…)` |
+| JS | callback returns `false` | — | `new Chat(path, { nCtx, nBatch })` |
+| C# | `Func<string,bool>` returns `false` | a signalled `CancellationToken` | `new Chat(path, nCtx: …, nBatch: …)` |
+
+A callback that returns nothing (`None`, `undefined`) **continues** — only an explicit false
+stops. In Python and C# a callback that throws stops generation and the exception is re-raised
+after the native call unwinds, rather than crossing the C frame.
+
+**C# source-breaking**: the stream callback is `Func<string, bool>`; an `Action<string>` no
+longer fits. No overload was kept, because the two would be ambiguous on an explicit `null` and
+a void delegate hides the stop signal entirely.
+
 ### Not done
 
 - **No slots and no continuous batching**, though both were measured and work — four concurrent
