@@ -42,12 +42,12 @@ against a real 1.5B model and a real reranker: identical output, down to rerank 
 ### Installing
 
 ```bash
-pip install modelnexus-core            # import modelnexus
+pip install muthuishere-modelnexus            # import modelnexus
 npm  install @muthuishere/modelnexus
 go   get github.com/muthuishere/modelnexus/bindings/go
 ```
 
-The PyPI *distribution* is `modelnexus-core` because `modelnexus` is held by an unrelated
+The PyPI *distribution* is `muthuishere-modelnexus` because `modelnexus` is held by an unrelated
 project; the *import* is still `modelnexus`.
 
 ### Getting the native library
@@ -109,4 +109,9 @@ Three independent libraries. None imports another. They meet at the OpenAI wire 
 
 ## License
 
-MIT
+MIT — see `LICENSE`.
+
+We redistribute compiled llama.cpp (MIT) and, because it is header-only and compiled into
+the bridge, nlohmann/json (MIT). Both notices ship inside every package next to the native
+library. Full accounting, including which dependencies are *not* redistributed and why no
+model weights are: [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

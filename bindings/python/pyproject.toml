@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 # PyPI's "modelnexus" is held by an unrelated project (ModelNexus 1.0.4, "Global AI
-# Model Vault"), and PyPI normalises names case-insensitively. The DISTRIBUTION is
-# modelnexus-core; the import stays `import modelnexus`.
-name = "modelnexus-core"
+# Model Vault"), and PyPI normalises names case-insensitively. So the distribution is
+# namespaced under the author's handle, mirroring the npm scope @muthuishere/modelnexus.
+# The IMPORT is unaffected: `import modelnexus`.
+name = "muthuishere-modelnexus"
 version = "0.1.0"
 description = "Local LLM inference in your own process — llama.cpp via a C ABI. No daemon, no port."
 readme = "README.md"

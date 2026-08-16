@@ -149,7 +149,9 @@ for /f "delims=" %%F in ('dir /s /b "%LIBSOURCE%\*.dll" 2^>nul') do (
   echo %%~nxF | findstr /i /c:"-impl" >nul || copy /y "%%F" "%DIST%\" >nul
 )
 
-if exist "%ROOT%\licenses\LICENSE-llama.cpp" copy /y "%ROOT%\licenses\LICENSE-llama.cpp" "%DIST%\" >nul
+rem Every notice, not just llama.cpp's -- nlohmann/json is header-only and compiled
+rem into the bridge, so its MIT notice travels with the binary too.
+if exist "%ROOT%\licenses\" copy /y "%ROOT%\licenses\*" "%DIST%\" >nul
 
 echo ==^> staged to %DIST%
 dir /b "%DIST%"

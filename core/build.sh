@@ -128,7 +128,9 @@ fi
 find "$LIB_SOURCE" -maxdepth 2 \( -name "*$EXT" -o -name "*$EXT.*" -o -name "*.[0-9]*$EXT" \) \
   ! -name "*-impl*" -exec cp -a {} "$DIST/" \; 2>/dev/null || true
 
-cp "$ROOT/licenses/LICENSE-llama.cpp" "$DIST/" 2>/dev/null || true
+# Every notice in licenses/, not just llama.cpp's. nlohmann/json is header-only and
+# compiled INTO the bridge, so its MIT notice has to travel with the binary too.
+cp "$ROOT"/licenses/* "$DIST/" 2>/dev/null || true
 
 echo "==> staged to $DIST"
 ls -1 "$DIST"

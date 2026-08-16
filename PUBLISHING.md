@@ -43,14 +43,14 @@ exist the PyPI and npm jobs fail on authentication.
 
 ### 1. PyPI — pending trusted publisher
 
-The distribution is **`modelnexus-core`**, not `modelnexus`: that name is held by an unrelated
+The distribution is **`muthuishere-modelnexus`**, not `modelnexus`: that name is held by an unrelated
 project ("Global AI Model Vault", 1.0.4) and PyPI normalises names case-insensitively. The
 import is unchanged — `import modelnexus`.
 
 Because the project does not exist yet, it needs a **pending** publisher:
 
 > pypi.org → Your account → Publishing → *Add a new pending publisher*
-> - PyPI Project Name: `modelnexus-core`
+> - PyPI Project Name: `muthuishere-modelnexus`
 > - Owner: `muthuishere` · Repository: `modelnexus`
 > - Workflow name: `release.yml`
 > - Environment: *(leave blank)*

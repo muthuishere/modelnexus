@@ -90,7 +90,7 @@ Two tiers (ADR-0004): `natives.yml` compiles the per-platform closure into a dur
 tag-keyed prerelease; `release.yml` **never compiles** — it downloads those and publishes.
 Nothing is ever published from a laptop. Targets are Go, PyPI and npm; there is no NuGet leg.
 
-The PyPI distribution is **`modelnexus-core`** (the bare name is taken by an unrelated
+The PyPI distribution is **`muthuishere-modelnexus`** (the bare name is taken by an unrelated
 project); the import is still `modelnexus`.
 
 ## Do not

@@ -17,7 +17,7 @@ account owner can create; see `PUBLISHING.md`. Native platforms: linux-x86_64, d
 windows-x86_64 (Intel macOS is staged by hand — GitHub's runners for it never start).
 
 ### Changed
-- The PyPI **distribution** is `modelnexus-core`, not `modelnexus` — that name is held by an
+- The PyPI **distribution** is `muthuishere-modelnexus`, not `modelnexus` — that name is held by an
   unrelated project ("Global AI Model Vault", 1.0.4) and PyPI normalises case-insensitively.
   The **import is unchanged**: `import modelnexus`. npm (`@muthuishere/modelnexus`) and the Go
   module path are unaffected.
