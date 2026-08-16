@@ -5,8 +5,11 @@
 - [x] Spike 0002 — callbacks across ctypes and purego. Verdict: both work; the core RETAINS
       the event callback for the engine's life, so a local trampoline segfaults. Panama,
       P/Invoke and koffi still unverified.
-- [ ] Spike 0003 — does the standalone CMake build cross-compile for linux-x64, linux-arm64,
-      darwin-arm64, darwin-x64, windows-x64 while consuming prebuilt llama.cpp libs?
+- [x] Cross-compilation — answered by `natives.yml` running for real rather than by a spike:
+      linux-x86_64, darwin-aarch64 and windows-x86_64 build and stage. Windows builds FROM
+      SOURCE (upstream ships no import libraries) and Intel macOS is staged by hand (ADR-0004).
+      NOTE: the spike numbered 0003 in the repo is `0003-abi-gaps-at-scale`, a different
+      question.
 - [ ] Read `llamabridge.cpp` (703 lines) end to end and record any assumption the header does
       not declare. Spike 0001 read only the contract.
 
