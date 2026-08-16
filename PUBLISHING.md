@@ -36,13 +36,28 @@ alone (ADR-0004) while the bridge moves independently, so a future release that 
 symbol would break old consumers silently. The Go client cache is now keyed on both, but the
 release itself is not.
 
+Released 2026-08-16. Natives re-staged first and **verified by reading the asset's symbol
+table**, not by trusting a green check: 17 symbols, including the three 0.2.0 additions.
+
 | leg | state |
 |---|---|
-| **Go** | Ready. Needs no credential — it is a tag push using `github.token`. |
-| **npm** | Blocked on owner-only registry setup (below). No `NPM_TOKEN` secret exists. |
-| **PyPI** | Blocked on owner-only registry setup (below). No `PYPI_API_TOKEN` secret exists. |
+| **Go** | **PUBLISHED and verified from outside.** `go get github.com/muthuishere/modelnexus/bindings/go@v0.2.0` from the public proxy into a clean module; with `MODELNEXUS_LIB` unset, `Fetch()` resolved its own cache and `CountTokens` — a 0.2.0-only entry point — returned `35 tokens of 4096`. That last part is deliberate: it cannot pass against stale natives. |
+| **npm** | Failed: `npm error code ENEEDAUTH`. |
+| **PyPI** | Failed: no publisher registered. |
 
-`ENABLE_GO`, `ENABLE_NPM`, `ENABLE_PYPI` are all `true`. The repo has **zero secrets**.
+`ENABLE_GO`, `ENABLE_NPM`, `ENABLE_PYPI` are all `true`. The repo has **zero secrets**, which is
+the whole of the npm/PyPI failure — see the owner-only setup below. Re-running after adding
+either credential is safe: every leg is idempotent.
+
+### The docs site had never been enabled
+
+`pages.yml` built 18 pages and failed at deploy with `HttpError: Not Found` — GitHub Pages was
+never turned on for the repo. Enabled with `build_type: workflow`; the site is live at
+<https://muthuishere.github.io/modelnexus/>.
+
+Worth naming, because it is the same failure shape as the stale natives: the build was green and
+the artifact was correct. It simply had nowhere to go. Read what reached the user, never what the
+job said.
 
 ## Status of 0.1.0
 
