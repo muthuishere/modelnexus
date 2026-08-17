@@ -76,6 +76,13 @@ jobs:
         if: matrix.script == 'sh'
         run: ./core/build.sh ${{ matrix.cross && format('--platform {0}', matrix.platform) || '' }}
 
+      # Go is NOT preinstalled on the arm64 macOS runners -- the x64 image has it, the
+      # ARM one does not, and the only symptom is `go: command not found` and exit 127
+      # from whichever line reaches for it first.
+      - uses: actions/setup-go@v5
+        if: matrix.cross
+        with: { go-version: '1.23', cache: false }
+
       - name: The cross-built native must LOAD AND GENERATE, not merely be the right arch
         if: matrix.cross
         run: |
@@ -91,9 +98,10 @@ jobs:
             *-aarch64) grep -q arm64  <<<"$arch" || { echo "::error::not arm64";  exit 1; } ;;
           esac
 
-          # Rosetta 2 is what makes an arm64 runner an honest Intel test bed, and it is
-          # NOT preinstalled -- the first attempt died here with exit 127, `arch`
-          # unable to exec an x86_64 binary. Installing it is one command and a minute.
+          # Rosetta 2 is what makes an arm64 runner an honest Intel test bed. It turned
+          # out to be present already -- the exit 127 was `go`, not `arch` -- but this
+          # stays as a real guard: if a future image drops it, the failure should name
+          # the reason instead of arriving as another command-not-found.
           #
           # Explicitly, rather than falling back to a weaker check: the entire reason
           # this step exists is that `lipo -archs` proves nothing, so degrading to it
