@@ -97,6 +97,19 @@ if not exist "%DIST%"     mkdir "%DIST%"
 
 set "CMAKEARGS=-S "%ROOT%" -B "%BUILDDIR%" -DLLB_HEADERS_DIR="%HEADERS%""
 
+rem On ARM64, build with clang-cl instead of MSVC.
+rem
+rem Not a preference -- llama.cpp refuses outright:
+rem   ggml/src/ggml-cpu/CMakeLists.txt:106  "MSVC is not supported for ARM, use clang"
+rem Its ARM CPU kernels use GCC/clang vector intrinsics MSVC does not implement, so
+rem there is no MSVC path to fall back to. -T ClangCL selects the clang-cl toolset
+rem that ships with Visual Studio; CMAKE_MSVC_RUNTIME_LIBRARY still applies, so the
+rem static-CRT choice carries over and the DLL stays self-contained.
+if /I "%ARCH%"=="aarch64" (
+  echo ==^> ARM64: using the ClangCL toolset ^(llama.cpp rejects MSVC here^)
+  set "CMAKEARGS=!CMAKEARGS! -T ClangCL"
+)
+
 if /I "%MODE%"=="prebuilt" (
   set "ARCHIVE=llama-%LLAMA_TAG%-bin-%ASSET%.zip"
   set "URL=https://github.com/ggml-org/llama.cpp/releases/download/%LLAMA_TAG%/!ARCHIVE!"
