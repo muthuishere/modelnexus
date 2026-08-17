@@ -4,7 +4,7 @@ go 1.23.0
 
 require (
 	github.com/muthuishere/modelnexus/bindings/go v0.2.1
-	github.com/muthuishere/toolnexus/golang v0.0.0
+	github.com/muthuishere/toolnexus/golang v0.16.0
 )
 
 require (
@@ -19,4 +19,6 @@ require (
 
 replace github.com/muthuishere/modelnexus/bindings/go => ../../../bindings/go
 
-replace github.com/muthuishere/toolnexus/golang => ../../../../toolnexus/golang
+// NO replace for toolnexus: this example exists to prove the PUBLISHED module works
+// against modelnexus. Pointing at a local checkout would prove only that the working
+// tree does.

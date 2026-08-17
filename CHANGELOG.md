@@ -40,6 +40,11 @@ time.
 
 ### Changed
 
+- **The toolnexus example uses `CreateInProcessClient`** (toolnexus 0.16.0) instead of supplying
+  an `http.RoundTripper`. There is no longer a base URL, an API key, or a wire style to invent
+  for a model that has no wire — and no hand-written translation into OpenAI's nested
+  `function:{name,arguments}` tool-call form, since both libraries speak the flat shape. The
+  example builds against the published module, not a local checkout.
 - **Python can now download the native library** when its wheel does not carry one, so a
   platform we do not publish gets a working library instead of an import error. Set
   `MODELNEXUS_NO_DOWNLOAD` to refuse the network. On a published platform nothing changes —
