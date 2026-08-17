@@ -25,6 +25,13 @@
 # core/dist/<platform-key>/.
 
 cmake_minimum_required(VERSION 3.18)
+
+# CMP0091 must be NEW *before* project() for CMAKE_MSVC_RUNTIME_LIBRARY to be
+# honoured at all; setting it later is silently ignored.
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+
 project(llamabridge CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -34,6 +41,21 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Headers root (llama.cpp source tree — used in BOTH modes for include paths).
 set(LLB_HEADERS_DIR "${CMAKE_SOURCE_DIR}/third_party/llama.cpp"
     CACHE PATH "llama.cpp source root (headers only in prebuilt mode)")
+
+# Link the MSVC runtime STATICALLY on Windows.
+#
+# Found the hard way, on a real Windows 11 box: the shipped 0.2.0 native failed
+# to load with "The specified module could not be found" -- naming llamabridge.dll,
+# which was present. The missing module was VCRUNTIME140.dll / MSVCP140.dll. A
+# fresh Windows does not have the Visual C++ Redistributable, and a library that
+# a user installs from npm or pip cannot reasonably ask them to go and install a
+# Microsoft redistributable first.
+#
+# Static linking makes the DLL self-contained. It costs a few hundred KB, which
+# is nothing next to the ggml libraries beside it.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 add_library(llamabridge SHARED src/llamabridge.cpp)
 

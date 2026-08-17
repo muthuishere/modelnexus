@@ -178,7 +178,7 @@ func ensureLoaded() error {
 			if st, err := os.Stat(path); err != nil || st.IsDir() {
 				continue
 			}
-			handle, err := purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+			handle, err := loadLibrary(path)
 			if err != nil {
 				// Present but unloadable is a different problem from absent, and far
 				// more confusing to debug. Keep it and report it.
