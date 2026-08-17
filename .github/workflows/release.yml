@@ -117,7 +117,7 @@ jobs:
         run: |
           python -m pip install --quiet build wheel
           cd bindings/python
-          for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64; do
+          for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64; do
             src="../../staged/$plat"
             [ -d "$src" ] || { echo "skipping $plat (not staged)"; continue; }
             rm -rf modelnexus/native && mkdir -p modelnexus/native
@@ -129,6 +129,7 @@ jobs:
               darwin-aarch64) tag=macosx_11_0_arm64 ;;
               darwin-x86_64)  tag=macosx_10_15_x86_64 ;;
               windows-x86_64) tag=win_amd64 ;;
+              windows-aarch64) tag=win_arm64 ;;
             esac
             python -m build --wheel --outdir dist_all
             for w in dist_all/*-any.whl; do
@@ -196,7 +197,7 @@ jobs:
           # optionalDependencies: npm installs only the platform that matches and
           # skips the rest without erroring. Proven pattern -- mochallama's CLI ships
           # this way today.
-          for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64; do
+          for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64; do
             src="staged/$plat"
             [ -d "$src" ] || { echo "skipping $plat (not staged)"; continue; }
             case "$plat" in
@@ -204,6 +205,7 @@ jobs:
               darwin-aarch64) os=darwin; cpu=arm64 ;;
               darwin-x86_64)  os=darwin; cpu=x64 ;;
               windows-x86_64) os=win32;  cpu=x64 ;;
+              windows-aarch64) os=win32; cpu=arm64 ;;
             esac
             pkg="pkg-$plat"; mkdir -p "$pkg/native/$plat"
             # -L, NOT -a: npm pack silently DROPS symlinks. llama.cpp ships its

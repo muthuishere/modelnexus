@@ -56,6 +56,14 @@ jobs:
           - { os: ubuntu-latest,   platform: linux-x86_64,   script: sh }
           - { os: macos-latest,    platform: darwin-aarch64, script: sh }
           - { os: windows-latest,  platform: windows-x86_64, script: cmd }
+          # Windows on ARM is not a niche any more -- every Copilot+ PC is one, and
+          # so is a Parallels VM on an Apple Silicon Mac. Verified on a real one:
+          # without this native, Node (a NATIVE arm64 process) cannot load the x64
+          # DLL AT ALL -- "Cannot load 'AMD x64' DLL in 'ARM64 little endian'
+          # process" -- and Go, which runs x64-emulated, loads the DLL and then
+          # dies inside llama.cpp's compute kernels with 0xC0000409. Neither
+          # failure is diagnosable from the message you get.
+          - { os: windows-11-arm,  platform: windows-aarch64, script: cmd }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
