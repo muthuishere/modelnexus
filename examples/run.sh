@@ -121,8 +121,18 @@ run_module() {
 }
 
 run_integrations() {
+  # A chat GGUF produces embeddings perfectly well -- modelnexus reads the hidden
+  # state, it does not need a model trained for retrieval. So the suite falls back
+  # to the chat model rather than skipping, and SAYS SO: a dedicated embedding model
+  # would give better vectors, and this proves the wiring, not the quality.
+  if [ -z "${MODELNEXUS_EMBED:-}" ] && [ -n "${MODELNEXUS_MODEL:-}" ]; then
+    export MODELNEXUS_EMBED="$MODELNEXUS_MODEL"
+    echo
+    echo "note: MODELNEXUS_EMBED is unset — using the chat model for embeddings."
+    echo "      Fine for proving the wiring; a real embedding GGUF gives better vectors."
+  fi
   run_module toolnexus "an agent with tools, model in this process" MODELNEXUS_MODEL
-  run_module citenexus "embeddings and grounded answers" MODELNEXUS_MODEL
+  run_module citenexus "embeddings and grounded answers" MODELNEXUS_MODEL MODELNEXUS_EMBED
 }
 
 if [ "$only" = "all" ] || [ "$only" = "js" ]; then
