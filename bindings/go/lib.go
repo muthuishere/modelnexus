@@ -30,6 +30,14 @@ func (e *ErrNativeLibraryNotFound) Error() string {
 	if e.Cause != nil {
 		b.WriteString("  cause: " + e.Cause.Error() + "\n")
 	}
+	// A bundle that failed to materialise is the most useful thing on this page --
+	// it means the consumer DID opt in and something went wrong, which "not found"
+	// alone would hide behind a list of paths.
+	if bundleErr != nil {
+		b.WriteString("  the bundled closure could not be materialised: " + bundleErr.Error() + "\n")
+	} else if bundled == nil {
+		b.WriteString("  no bundled closure: import github.com/muthuishere/modelnexus/natives to embed one\n")
+	}
 	b.WriteString("  looked in:\n")
 	for _, p := range e.Searched {
 		b.WriteString("    " + p + "\n")
@@ -39,6 +47,28 @@ func (e *ErrNativeLibraryNotFound) Error() string {
 }
 
 func (e *ErrNativeLibraryNotFound) Unwrap() error { return e.Cause }
+
+// bundled is set by the optional natives module's init(). It materialises the
+// embedded closure and returns the directory holding it.
+//
+// A func rather than a path, because materialisation costs a disk write and must
+// not happen for a process that never loads the library -- and because a nil check
+// is how the base module stays free of the ~70 MB it would otherwise carry
+// (ADR-0010).
+var (
+	bundled   func() (string, error)
+	bundleErr error
+)
+
+// RegisterBundle installs a bundled native closure as resolution step 2. It is
+// called by the natives module's init() and is not meant for direct use; the
+// supported way to bundle is:
+//
+//	import _ "github.com/muthuishere/modelnexus/natives"
+//
+// Calling it twice is a programming error in the importing tree, not a runtime
+// condition, so the last registration simply wins.
+func RegisterBundle(fn func() (string, error)) { bundled = fn }
 
 // PlatformKey is the os-arch key used for the staged native directory layout.
 func PlatformKey() string {
@@ -111,6 +141,24 @@ func candidates() []string {
 			out = append(out, env)
 		} else {
 			out = append(out, filepath.Join(env, name))
+		}
+	}
+
+	// A bundled closure, if the consumer opted into one. Second, so an explicit
+	// MODELNEXUS_LIB still wins -- overriding the library is the whole point of
+	// that variable and a bundle must not quietly take it away.
+	//
+	// Ahead of core/dist and the download cache, because a consumer who imported
+	// the natives module asked for a hermetic build; reaching the network after
+	// that would be the opposite of what they requested.
+	if bundled != nil {
+		if dir, err := bundled(); err == nil && dir != "" {
+			out = append(out, filepath.Join(dir, name))
+		} else if err != nil {
+			// Not fatal: the remaining steps may still find a library. But it must
+			// not vanish -- a read-only HOME is a real failure mode, and "no library
+			// found" would be a terrible way to learn about it.
+			bundleErr = err
 		}
 	}
 

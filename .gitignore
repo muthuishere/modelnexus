@@ -41,3 +41,10 @@ spikes/0009-bundle-natives/llama-prebuilt/
 spikes/0009-bundle-natives/*/native/
 spikes/0009-bundle-natives/*.bin
 spikes/0009-bundle-natives/*/probe.bin
+
+# The natives module's payload: ~14 MB per platform, five platforms. Committing it
+# would add ~70 MB to this repository on every llama.cpp bump, permanently, for
+# everyone who clones it. Staged by natives/stage.sh locally and by the release
+# workflow into the tagged commit (ADR-0010).
+natives/payload/*/*
+!natives/payload/*/PLACEHOLDER

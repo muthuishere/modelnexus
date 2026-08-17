@@ -1,0 +1,10 @@
+This directory is a PLACEHOLDER so that go:embed has something to match.
+
+The real closure is copied in by `task natives:stage` (locally) or by the release
+workflow (for a published module). It is NOT committed: ~14 MB per platform, five
+platforms, and a fresh copy on every llama.cpp bump would grow this repository by
+~70 MB per version, permanently, for everyone who clones it.
+
+A module built with only this file compiles and then fails at first use with the
+binding's typed "native bridge not found" error, listing every path it tried --
+which is the correct outcome for a bundle that was never populated.

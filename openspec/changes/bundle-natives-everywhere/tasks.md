@@ -27,16 +27,16 @@
 
 ## 3. Go — the natives module
 
-- [ ] 3.1 New module `github.com/muthuishere/modelnexus/natives`, per-platform `//go:embed`
+- [x] 3.1 New module `github.com/muthuishere/modelnexus/natives`, per-platform `//go:embed`
       behind build tags so the binary carries one platform and the module carries all
-- [ ] 3.2 Extraction: temp-then-rename, `.complete` stamp, content-hash cache key, `0o755`,
+- [x] 3.2 Extraction: temp-then-rename, `.complete` stamp, content-hash cache key, `0o755`,
       lost-race-is-success. Spike 0009's `extract/main.go` is the reference, rewritten
-- [ ] 3.3 Replay `links.json`; fail loudly naming the entry if a link cannot be created
-- [ ] 3.4 `init()` registers the resolver at step 2, using the same hook shape as
+- [x] 3.3 Replay `links.json`; fail loudly naming the entry if a link cannot be created
+- [x] 3.4 `init()` registers the resolver at step 2, using the same hook shape as
       `RegisterScheme`
-- [ ] 3.5 `bindings/go` resolution order becomes the four ordered steps; the typed error names
+- [x] 3.5 `bindings/go` resolution order becomes the four ordered steps; the typed error names
       every step tried and why each missed
-- [ ] 3.6 Confirm `bindings/go`'s `go.mod` gains no dependency on the natives module
+- [x] 3.6 Confirm `bindings/go`'s `go.mod` gains no dependency on the natives module
 
 ## 4. Python and JS reach the steps they are missing
 
