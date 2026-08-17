@@ -86,10 +86,30 @@ the steps they are missing from the resolution order:
 That last one is what closes the Intel-Mac-shaped hole for any *future* unbuilt platform,
 without moving the happy path off the wheel.
 
-Python and JS ship the closure as real files, so they never materialise anything and the
-symlink problem does not arise — wheels and npm tarballs both carry symlinks. The manifest
-travels with them anyway, because the parity gate compares staged closures across bindings and
-a file present in one and absent in another is exactly what it exists to catch.
+### Wheels dereference, and that is correct
+
+Measured rather than assumed. Building the 0.2.1 wheel from a 14 MB staged closure:
+
+```
+wheel on disk : 14.1 MB
+native entries: 31   symlinks: 0   uncompressed: 42.4 MB
+```
+
+setuptools copies package data with `shutil.copy`, which follows links, so all 18 become full
+copies. **Download size is unaffected** — zip deflate re-compresses the duplicates — but
+installed size is 3×, and this is the status quo, not something this change introduces.
+
+It should stay that way. `pip` extracts wheels with `zipfile`, which does **not** restore
+symlink entries: a link would install as a regular file whose *content* is the target's name,
+producing a 25-byte "library". Dereferencing is the safe choice for wheels; the alternative is
+broken, not merely large.
+
+npm tarballs are a different matter — tar carries links natively — so the JS packages should
+keep them, and that is worth verifying rather than assuming.
+
+This is why the requirement is written as **name completeness** rather than link preservation.
+The bridge resolves siblings by name at load time; whether a name is a link or a copy is an
+efficiency question, and the ecosystems disagree about which is safe.
 
 ## darwin-x86_64
 

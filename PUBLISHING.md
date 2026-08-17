@@ -67,7 +67,8 @@ job said.
 | **npm** | Blocked: `npm error code ENEEDAUTH`. |
 | **PyPI** | Blocked: `invalid-publisher: valid token, but no corresponding publisher`. The OIDC token is fine; PyPI has nothing registered to match it. |
 
-Natives are staged for **linux-x86_64, darwin-aarch64, windows-x86_64** at the
+Natives are staged for **linux-x86_64, darwin-aarch64, darwin-x86_64, windows-x86_64,
+windows-aarch64** at the
 `natives-b9371` release, all verified as real zips containing the bridge.
 
 Re-running after you add credentials is safe: `gh workflow run release.yml -f version=0.1.0`.
@@ -146,13 +147,16 @@ fails at first use:
 - **Windows builds from source.** llama.cpp publishes no `.lib` import libraries for Windows,
   and MSVC cannot link a DLL without one, so the prebuilt fast path is impossible there. Slow,
   and confined to `natives.yml`.
-- **Intel macOS (`darwin-x86_64`) is NOT built in CI** — those runners queue indefinitely, and
-  one job that never starts blocks publishing for every platform that did. It is absent from
-  both matrices by design. `release.yml` skips platforms that are not staged, so the other three
-  publish normally. To add Intel macOS, stage it by hand from an Intel Mac:
-  `./core/build.sh && cd core/dist && zip -ry natives-darwin-x86_64.zip darwin-x86_64 &&
-  gh release upload natives-b9371 natives-darwin-x86_64.zip --clobber`
-  (this is the pattern mochallama already uses for the same platform).
+- **Intel macOS (`darwin-x86_64`) is CROSS-BUILT on the arm64 runner**, and needs no manual
+  step. GitHub's Intel runners queue indefinitely, so it used to be seeded by hand — which in
+  practice meant absent. Prebuilt mode never compiles llama.cpp (upstream publishes the x86_64
+  dylibs), so `./core/build.sh --platform darwin-x86_64` is one clang invocation for our bridge.
+  CI verifies it by loading it under Rosetta and generating a token, because architecture
+  inspection alone is the same weak evidence that let three broken Windows natives ship green
+  (ADR-0010, spike 0009).
+- **A missing platform now FAILS the release** rather than being skipped. A silent skip is how
+  a package ships with no library in it: the job stays green and the failure lands on a user at
+  import time.
 
 ## Windows — verified, at last
 

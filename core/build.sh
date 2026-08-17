@@ -12,6 +12,10 @@
 #                              Slow (tens of minutes), but it is yours end to end and
 #                              it is the fallback when an upstream asset is broken.
 #   ./build.sh --clean         remove build/ and dist/ first.
+#   ./build.sh --platform KEY  cross-build for another platform key. Only
+#                              darwin-x86_64 from an arm64 Mac is supported, and only
+#                              because prebuilt mode never compiles llama.cpp — this
+#                              is one clang invocation, not a port (ADR-0010).
 #
 # Output: dist/<platform-key>/ containing libllamabridge plus the llama/ggml libs it
 # needs at runtime. The bridge resolves its siblings via rpath @loader_path/$ORIGIN,
@@ -27,17 +31,23 @@ LLAMA_TAG="${LLAMA_TAG:-b9371}"
 cd "$(dirname "$0")"
 ROOT="$PWD"
 MODE="prebuilt"
+TARGET=""
+want_platform=0
 for arg in "$@"; do
+  if [ "$want_platform" = 1 ]; then TARGET="$arg"; want_platform=0; continue; fi
   case "$arg" in
     --source) MODE="source" ;;
     --clean)  rm -rf "$ROOT/build" "$ROOT/dist" ;;
+    --platform) want_platform=1 ;;
+    --platform=*) TARGET="${arg#--platform=}" ;;
     # One place knows how to read the pin. Anything else parsing this file with sed
     # is a second source of truth waiting to drift.
     --print-tag) echo "$LLAMA_TAG"; exit 0 ;;
-    --help|-h) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --help|-h) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
+[ "$want_platform" = 0 ] || { echo "--platform needs a key, e.g. darwin-x86_64" >&2; exit 2; }
 
 # ---- platform key -----------------------------------------------------------
 case "$(uname -s)" in
@@ -52,6 +62,33 @@ case "$(uname -m)" in
 esac
 PLATFORM="$OS-$ARCH"
 
+# ---- cross-build ------------------------------------------------------------
+# Only one cross is supported, and only because prebuilt mode never compiles
+# llama.cpp: upstream already publishes the x86_64 dylibs, so this compiles our
+# ~890-line bridge for another arch and stages upstream's libraries beside it.
+# That is why no Intel runner is needed (ADR-0010, spike 0009).
+#
+# It is NOT a general cross-compilation facility. A key this build cannot honestly
+# produce is refused rather than silently mislabelled -- a dist/ named for a
+# platform it cannot run on is worse than no dist/ at all.
+CROSS_ARGS=()
+if [ -n "$TARGET" ] && [ "$TARGET" != "$PLATFORM" ]; then
+  case "$PLATFORM/$TARGET" in
+    darwin-aarch64/darwin-x86_64|darwin-x86_64/darwin-aarch64)
+      CROSS_ARGS+=("-DCMAKE_OSX_ARCHITECTURES=${TARGET#darwin-}")
+      # CMake spells Apple arm64 "arm64", our key spells it "aarch64".
+      [ "$TARGET" = "darwin-aarch64" ] && CROSS_ARGS=("-DCMAKE_OSX_ARCHITECTURES=arm64")
+      echo "==> cross-building $TARGET on $PLATFORM"
+      PLATFORM="$TARGET"
+      ;;
+    *)
+      echo "cannot cross-build $TARGET from $PLATFORM" >&2
+      echo "  supported: darwin-x86_64 <-> darwin-aarch64 (Apple ships the cross toolchain)" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 # llama.cpp names its release assets differently from our platform key.
 case "$PLATFORM" in
   darwin-x86_64)  ASSET=macos-x64 ;;
@@ -62,7 +99,9 @@ case "$PLATFORM" in
 esac
 
 HEADERS="$ROOT/third_party/llama.cpp"
-BUILD="$ROOT/build/cmake"
+# Per-platform: a cross-build must not reuse the host's CMake cache, which pins the
+# architecture from the first configure and would silently produce the wrong one.
+BUILD="$ROOT/build/cmake/$PLATFORM"
 DIST="$ROOT/dist/$PLATFORM"
 PREBUILT="$ROOT/build/llama-prebuilt"
 
@@ -79,7 +118,7 @@ if [ ! -f "$HEADERS/include/llama.h" ]; then
 fi
 
 mkdir -p "$BUILD" "$DIST"
-CMAKE_ARGS=(-S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release "-DLLB_HEADERS_DIR=$HEADERS")
+CMAKE_ARGS=(-S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release "-DLLB_HEADERS_DIR=$HEADERS" "${CROSS_ARGS[@]+"${CROSS_ARGS[@]}"}")
 
 if [ "$MODE" = "prebuilt" ]; then
   ARCHIVE="llama-$LLAMA_TAG-bin-$ASSET.tar.gz"
@@ -131,6 +170,36 @@ find "$LIB_SOURCE" -maxdepth 2 \( -name "*$EXT" -o -name "*$EXT.*" -o -name "*.[
 # Every notice in licenses/, not just llama.cpp's. nlohmann/json is header-only and
 # compiled INTO the bridge, so its MIT notice has to travel with the binary too.
 cp "$ROOT"/licenses/* "$DIST/" 2>/dev/null || true
+
+# ---- link manifest ----------------------------------------------------------
+# The symlinks above are load-bearing: the bridge links @rpath/libllama.0.dylib,
+# which IS one. But some distribution mechanisms cannot carry a symlink -- go:embed
+# takes regular files only, records nothing, and reports nothing, so a naive bundle
+# yields a closure that looks complete and cannot load (spike 0009).
+#
+# So the build records them. Generated from what was actually staged, which is the
+# only way it cannot drift from what ships. Empty on Windows; same shape everywhere,
+# because a consumer branching on platform is a consumer with a bug waiting.
+python3 - "$DIST" <<'PY'
+import json, os, sys
+dist = sys.argv[1]
+links = {}
+for name in sorted(os.listdir(dist)):
+    p = os.path.join(dist, name)
+    if os.path.islink(p):
+        links[name] = os.readlink(p)
+
+# A link whose target is missing is a closure that will fail at dlopen, far from
+# here and with a worse message. Refuse to stage it.
+broken = [f"{n} -> {t}" for n, t in links.items()
+          if not os.path.exists(os.path.join(dist, t))]
+if broken:
+    sys.exit("dangling symlink(s) in the staged closure:\n  " + "\n  ".join(broken))
+
+with open(os.path.join(dist, "links.json"), "w") as f:
+    json.dump({"links": links}, f, indent=1, sort_keys=True)
+print(f"==> link manifest: {len(links)} symlink(s)")
+PY
 
 echo "==> staged to $DIST"
 ls -1 "$DIST"

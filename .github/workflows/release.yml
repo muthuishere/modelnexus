@@ -77,12 +77,36 @@ jobs:
       - name: Download the staged natives (no compilation)
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          mkdir -p staged && cd staged
+          mkdir -p zips && cd zips
           gh release download "natives-${{ needs.preflight.outputs.llama_tag }}" --pattern '*.zip'
-          for z in *.zip; do unzip -qo "$z"; done
           ls -1
+          # Unzipped ONLY to verify. The artifact that travels between jobs is the
+          # zips, because actions/upload-artifact dereferences symlinks -- which
+          # would turn each 14 MB closure into ~40 MB of duplicated libraries inside
+          # every wheel, silently. A zip carries the links by construction.
+          mkdir -p ../staged && for z in *.zip; do unzip -qo "$z" -d ../staged; done
+
+      - name: Every supported platform must be staged
+        run: |
+          # This used to be a per-leg `skipping $plat (not staged)`, which is how an
+          # empty package ships: the job stays green, the wheel installs, and the
+          # failure lands on a user at import time. ADR-0010 makes the supported set
+          # a built set -- so a missing platform is a release failure, here, once.
+          cd staged
+          missing=()
+          for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64; do
+            if [ -f "$plat/links.json" ]; then
+              echo "  ok      $plat"
+            else
+              missing+=("$plat"); echo "  MISSING $plat"
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::not staged: ${missing[*]} — run the natives workflow for the current pin"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
-        with: { name: natives, path: staged }
+        with: { name: natives, path: zips }
 
   publish-go:
     needs: [preflight, natives]
@@ -109,7 +133,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: natives, path: staged }
+        with: { name: natives, path: zips }
+      - name: Unzip the closures (zip preserves the symlinks the wheel needs)
+        run: mkdir -p staged && for z in zips/*.zip; do unzip -qo "$z" -d staged; done
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
 
@@ -119,7 +145,9 @@ jobs:
           cd bindings/python
           for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64; do
             src="../../staged/$plat"
-            [ -d "$src" ] || { echo "skipping $plat (not staged)"; continue; }
+            # Guaranteed by the staging check in the natives job; asserted again
+            # here so a future edit cannot reintroduce a silent skip.
+            [ -d "$src" ] || { echo "::error::$plat missing from staged/"; exit 1; }
             rm -rf modelnexus/native && mkdir -p modelnexus/native
             cp -a "$src" modelnexus/native/
             # A wheel is exactly the right vehicle for a native library; that is what
@@ -156,7 +184,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: natives, path: staged }
+        with: { name: natives, path: zips }
+      - name: Unzip the closures (zip preserves the symlinks the wheel needs)
+        run: mkdir -p staged && for z in zips/*.zip; do unzip -qo "$z" -d staged; done
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -199,7 +229,9 @@ jobs:
           # this way today.
           for plat in linux-x86_64 darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64; do
             src="staged/$plat"
-            [ -d "$src" ] || { echo "skipping $plat (not staged)"; continue; }
+            # Guaranteed by the staging check in the natives job; asserted again
+            # here so a future edit cannot reintroduce a silent skip.
+            [ -d "$src" ] || { echo "::error::$plat missing from staged/"; exit 1; }
             case "$plat" in
               linux-x86_64)   os=linux;  cpu=x64 ;;
               darwin-aarch64) os=darwin; cpu=arm64 ;;

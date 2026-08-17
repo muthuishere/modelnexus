@@ -166,6 +166,15 @@ rem Every notice, not just llama.cpp's -- nlohmann/json is header-only and compi
 rem into the bridge, so its MIT notice travels with the binary too.
 if exist "%ROOT%\licenses\" copy /y "%ROOT%\licenses\*" "%DIST%\" >nul
 
+rem ---- link manifest ----------------------------------------------------------
+rem Windows staging has no symlinks, so this is always empty -- and it is written
+rem anyway. A consumer that has to branch on platform to find out whether the
+rem manifest exists is a consumer with a bug waiting; every closure describes
+rem itself the same way (ADR-0010). Written directly rather than through python,
+rem which a Windows runner is not guaranteed to have.
+> "%DIST%\links.json" echo {"links": {}}
+
+echo ==^> link manifest: 0 symlink(s)
 echo ==^> staged to %DIST%
 dir /b "%DIST%"
 exit /b 0

@@ -48,13 +48,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # NOTE: darwin-x86_64 is deliberately absent. GitHub's Intel macOS runners
-          # queue indefinitely -- observed 50+ minutes with no start, repeatedly -- and
-          # one job that never runs blocks the publish step for every platform that
-          # did. mochallama hit exactly this and seeds Intel macOS by hand; PUBLISHING.md
-          # carries the one-liner. Re-add this entry if the runners become reliable.
           - { os: ubuntu-latest,   platform: linux-x86_64,   script: sh }
           - { os: macos-latest,    platform: darwin-aarch64, script: sh }
+          # Intel macOS, CROSS-BUILT on the arm64 runner. GitHub's Intel runners queue
+          # indefinitely -- 50+ minutes with no start, repeatedly -- and one job that
+          # never runs blocks the publish for every platform that did. It used to be
+          # seeded by hand, which in practice meant absent.
+          #
+          # No Intel runner is needed: prebuilt mode never compiles llama.cpp (upstream
+          # publishes the x86_64 dylibs), so this is one clang invocation for our
+          # ~890-line bridge. Verified under Rosetta below -- ADR-0010, spike 0009.
+          - { os: macos-latest,    platform: darwin-x86_64,  script: sh, cross: true }
           - { os: windows-latest,  platform: windows-x86_64, script: cmd }
           # Windows on ARM is not a niche any more -- every Copilot+ PC is one, and
           # so is a Parallels VM on an Apple Silicon Mac. Verified on a real one:
@@ -70,7 +74,34 @@ jobs:
 
       - name: Build (unix)
         if: matrix.script == 'sh'
-        run: ./core/build.sh
+        run: ./core/build.sh ${{ matrix.cross && format('--platform {0}', matrix.platform) || '' }}
+
+      - name: The cross-built native must LOAD AND GENERATE, not merely be the right arch
+        if: matrix.cross
+        run: |
+          # `lipo -archs` saying x86_64 is the same weak claim that let three broken
+          # Windows natives ship green: the ARM one loaded cleanly and then died
+          # inside ggml's compute kernels with 0xC0000409. Only producing a token
+          # exercises that path, and Rosetta 2 makes this runner an honest Intel
+          # test bed.
+          arch="$(lipo -archs core/dist/${{ matrix.platform }}/libllamabridge.dylib)"
+          echo "bridge arch: $arch"
+          case "${{ matrix.platform }}" in
+            *-x86_64)  grep -q x86_64 <<<"$arch" || { echo "::error::not x86_64"; exit 1; } ;;
+            *-aarch64) grep -q arm64  <<<"$arch" || { echo "::error::not arm64";  exit 1; } ;;
+          esac
+
+          # A 0.5B model: this proves the kernels run, not that the model is good.
+          model="$PWD/.model.gguf"
+          curl -fsSL -o "$model" \
+            "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true"
+
+          # Built GOARCH=amd64 and run under Rosetta 2, which is what makes an arm64
+          # runner an honest Intel test bed. -arch makes a silently-native binary a
+          # failure rather than a false pass.
+          (cd bindings/go && GOOS=darwin GOARCH=amd64 go build -o /tmp/loadprobe ./cmd/loadprobe)
+          MODELNEXUS_LIB="$PWD/core/dist/${{ matrix.platform }}" \
+            arch -x86_64 /tmp/loadprobe -arch amd64 "$model"
 
       - name: Build (windows)
         if: matrix.script == 'cmd'

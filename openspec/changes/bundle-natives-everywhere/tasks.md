@@ -2,24 +2,27 @@
 
 ## 1. Build produces a complete, self-describing closure
 
-- [ ] 1.1 `core/build.sh` writes `links.json` into `dist/<platform>/` — every symlink with its
+- [x] 1.1 `core/build.sh` writes `links.json` into `dist/<platform>/` — every symlink with its
       target, generated from what was actually staged
-- [ ] 1.2 `core/build.cmd` writes the same file (empty `links` on Windows); the shape must not
+- [x] 1.2 `core/build.cmd` writes the same file (empty `links` on Windows); the shape must not
       differ by platform
-- [ ] 1.3 `core/build.sh --platform <key>` cross-builds, setting `CMAKE_OSX_ARCHITECTURES` and
+- [x] 1.3 `core/build.sh --platform <key>` cross-builds, setting `CMAKE_OSX_ARCHITECTURES` and
       the llama.cpp asset name from the key rather than from `uname`
-- [ ] 1.4 A staged closure with a link whose target is absent fails the build — a closure that
+- [x] 1.4 A staged closure with a link whose target is absent fails the build — a closure that
       cannot load must not reach a release
+- [ ] 1.5 Verify the npm platform tarballs carry symlinks (tar can; measured that wheels
+      cannot, and dereference — 14 MB staged becomes 42 MB installed). If npm dereferences
+      too, say so in the docs rather than quietly shipping 3x
 
 ## 2. darwin-x86_64 is built, not seeded
 
-- [ ] 2.1 Add `darwin-x86_64` to the `natives.yml` matrix on `macos-latest`, via `--platform`
-- [ ] 2.2 CI runs the cross-built native under Rosetta and requires a correct generated token.
+- [x] 2.1 Add `darwin-x86_64` to the `natives.yml` matrix on `macos-latest`, via `--platform`
+- [x] 2.2 CI runs the cross-built native under Rosetta and requires a correct generated token.
       Architecture inspection alone is not acceptance — the Windows ARM native passed that and
       died in ggml's kernels
-- [ ] 2.3 Remove the hand-seeding one-liner from `PUBLISHING.md` and the "deliberately absent"
+- [x] 2.3 Remove the hand-seeding one-liner from `PUBLISHING.md` and the "deliberately absent"
       note from `natives.yml:51`
-- [ ] 2.4 `release.yml` fails on a supported platform with no staged closure, instead of
+- [x] 2.4 `release.yml` fails on a supported platform with no staged closure, instead of
       `skipping $plat (not staged)` — a silent skip is how an empty package ships
 
 ## 3. Go — the natives module

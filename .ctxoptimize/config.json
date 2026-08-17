@@ -1,0 +1,30 @@
+{
+  "name": "modelnexus",
+  "modules": [
+    {
+      "path": "bindings/go"
+    },
+    {
+      "path": "bindings/js"
+    },
+    {
+      "path": "bindings/python"
+    },
+    {
+      "path": "core/tests/winverify"
+    },
+    {
+      "path": "examples/go"
+    },
+    {
+      "path": "examples/go/toolnexus"
+    },
+    {
+      "path": "examples/js"
+    },
+    {
+      "path": "site"
+    }
+  ],
+  "wiki": false
+}
