@@ -44,10 +44,16 @@ func Resolve(ctx context.Context, ref string, onProgress func(done, total int64)
 	case strings.HasPrefix(ref, "s3://"):
 		return resolveS3(ctx, ref, onProgress)
 	default:
-		if _, err := os.Stat(ref); err != nil {
-			return "", &Error{Code: "MODEL_NOT_FOUND", Message: "no file at " + ref +
-				" (a reference with no scheme is treated as a local path; use hf: / s3:// / https:// for a remote one)"}
-		}
+		// A path is returned UNCHANGED and unchecked, exactly as ADR-0009 says.
+		//
+		// An os.Stat here looks like an improvement and is not: it made Go report
+		// MODEL_NOT_FOUND where every other binding reports the core's
+		// MODEL_LOAD_FAILED for the same input. Error codes are part of the
+		// cross-binding contract, and a binding inventing one locally is precisely
+		// what ADR-0002 forbids. The core already names the path it could not open.
+		//
+		// If a distinct "no such file" code is wanted, it belongs in the ABI and in
+		// every binding at once — not here.
 		return ref, nil
 	}
 }

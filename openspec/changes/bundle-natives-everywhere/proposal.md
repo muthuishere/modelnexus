@@ -43,8 +43,9 @@ the parity gate:
 3. `core/dist/<platform>/` — working in the tree
 4. `Fetch()` — download from the tag-keyed release
 
-Today Go has 1, 3, 4 and Python/JS have 2. Afterwards everyone has all four. This is the part
-that makes it a specification rather than three implementations that happen to work.
+Today Go has 1, 3, 4; Python and JS have 1, 2, 3. Nobody has all four, and no two agree.
+Afterwards everyone has all four, in the same order. This is the part that makes it a
+specification rather than three implementations that happen to work.
 
 **The build emits a symlink manifest.** Spike 0009 found that `go:embed` silently drops all 18
 symlinks in `dist/`, including `libllama.0.dylib` — which is precisely what the bridge links

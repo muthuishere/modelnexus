@@ -51,10 +51,10 @@
 
 ## 4. Python and JS reach the steps they are missing
 
-- [ ] 4.1 Python honours `MODELNEXUS_LIB` first
-- [ ] 4.2 Python falls back to `core/dist/<platform>/`, then to a `Fetch()` port
-- [ ] 4.3 JS honours `MODELNEXUS_LIB` first
-- [ ] 4.4 JS falls back to `core/dist/<platform>/`, then to a `Fetch()` port
+- [x] 4.1 ~~Python honours `MODELNEXUS_LIB` first~~ — already did (`_lib.py:68`)
+- [x] 4.2 Python gains the download step, ported from `fetch.go`
+- [x] 4.3 ~~JS honours `MODELNEXUS_LIB` first~~ — already did (`lib.js:46`)
+- [ ] 4.4 JS gains the download step, ported from `fetch.go`
 - [ ] 4.5 Both raise a typed error naming every step tried when all four miss
 - [ ] 4.6 C# follows the same order — unpublished, but ADR-0002 does not exempt it
 

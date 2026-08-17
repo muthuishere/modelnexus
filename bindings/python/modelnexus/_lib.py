@@ -13,6 +13,8 @@ import platform
 import sys
 from pathlib import Path
 
+from . import _fetch
+
 _LIB_BASENAME = "llamabridge"
 
 
@@ -55,11 +57,14 @@ def _lib_filename() -> str:
 
 
 def _candidate_paths() -> list[Path]:
-    """Search order, most explicit first.
+    """Search order, most explicit first. The same four steps in every binding.
 
     1. ``MODELNEXUS_LIB`` -- a full path to the library, or the directory holding it.
     2. Natives bundled inside this package (how a wheel ships).
     3. The repo's own ``core/dist/<platform>`` (how a developer works).
+    4. A download (``_fetch``), tried only if the first three miss -- see ``load``.
+
+    Step 4 is not a path, so it is not listed here; it is the last resort in ``load``.
     """
     name = _lib_filename()
     key = platform_key()
@@ -106,10 +111,32 @@ def load() -> ctypes.CDLL:
         _cached = lib
         return lib
 
+    # Step 4. A wheel for a published platform never reaches this: the library was
+    # already inside the package at step 2. This is for the platform we do not
+    # publish, where the alternative is an import error with no way forward.
+    fetch_error: str | None = None
+    if os.environ.get("MODELNEXUS_NO_DOWNLOAD"):
+        fetch_error = "download skipped: MODELNEXUS_NO_DOWNLOAD is set"
+    else:
+        try:
+            downloaded = _fetch.fetch(platform_key(), _lib_filename()) / _lib_filename()
+            tried.append(str(downloaded))
+            lib = ctypes.CDLL(str(downloaded))
+            _bind_signatures(lib)
+            _cached = lib
+            return lib
+        except _fetch.NativesUnavailable as exc:
+            fetch_error = str(exc)
+        except OSError as exc:
+            raise NativeLibraryNotFound(
+                f"downloaded the native bridge but could not load it: {exc}"
+            ) from exc
+
     raise NativeLibraryNotFound(
         "could not locate the modelnexus native bridge.\n"
         "Looked in:\n  " + "\n  ".join(tried) + "\n"
-        "Build it with core/build.sh, or set MODELNEXUS_LIB to the library or its directory."
+        + (f"Download: {fetch_error}\n" if fetch_error else "")
+        + "Build it with core/build.sh, or set MODELNEXUS_LIB to the library or its directory."
     )
 
 

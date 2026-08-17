@@ -29,12 +29,21 @@ time.
 
 ### Fixed
 
+- **Go reported a different error code than every other binding** when asked to open a model
+  file that does not exist: `MODEL_NOT_FOUND` where Python, JS and C# all report
+  `MODEL_LOAD_FAILED`. Introduced by the model-reference work and caught by the cross-binding
+  test that exists for exactly this. Go now matches; a distinct "no such file" code, if wanted,
+  belongs in the ABI and in every binding at once.
 - **A release could publish a package with no library in it.** A platform whose native was not
   staged was silently skipped, the job stayed green, and the failure reached a user at import
   time. A missing platform now fails the release.
 
 ### Changed
 
+- **Python can now download the native library** when its wheel does not carry one, so a
+  platform we do not publish gets a working library instead of an import error. Set
+  `MODELNEXUS_NO_DOWNLOAD` to refuse the network. On a published platform nothing changes —
+  the library is already in the wheel and no download is attempted.
 - All bindings resolve the native library through the same four steps in the same order:
   `MODELNEXUS_LIB`, a bundled closure, the repository's `core/dist/`, then a download. An
   explicit `MODELNEXUS_LIB` still wins over everything, including a bundle.

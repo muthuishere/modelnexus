@@ -76,15 +76,15 @@ out to bite in practice.
 
 ## Python and JavaScript
 
-No packaging change — wheels and `optionalDependencies` already bundle correctly. Both gain
-the steps they are missing from the resolution order:
+No packaging change — wheels and `optionalDependencies` already bundle correctly. Read rather
+than assumed: both already honour `MODELNEXUS_LIB` first and already fall back to
+`core/dist/<platform>/` (`_lib.py:57`, `lib.js:42`). The proposal originally claimed otherwise
+and was wrong.
 
-- `MODELNEXUS_LIB` first (Python and JS currently ignore it)
-- `core/dist/<platform>/` for in-tree work
-- `Fetch()` last, ported from `fetch.go`, for a platform the distribution does not carry
-
-That last one is what closes the Intel-Mac-shaped hole for any *future* unbuilt platform,
-without moving the happy path off the wheel.
+What they genuinely lack is the **last** step: a download, ported from `fetch.go`. That is what
+closes the Intel-Mac-shaped hole for any *future* unbuilt platform, without moving the happy
+path off the wheel — a user on a platform the distribution does not carry gets a working
+library instead of an import error.
 
 ### Wheels dereference, and that is correct
 
@@ -106,6 +106,32 @@ broken, not merely large.
 
 npm tarballs are a different matter — tar carries links natively — so the JS packages should
 keep them, and that is worth verifying rather than assuming.
+
+### The download path had the same bug, and it fails SILENTLY
+
+Found while porting `fetch.go` to Python. `ZipFile.extractall` does not restore symlinks
+either: it writes each one as a regular file whose *content* is the target's name, so
+`libllama.0.dylib` becomes a 23-byte text file.
+
+What happens next is the part worth knowing. dyld cannot load the stub — and **does not
+stop.** It continues its search and binds against whatever llama.cpp is installed on the
+machine:
+
+```
+$ DYLD_PRINT_LIBRARIES=1 …
+  …/darwin-aarch64/libllamabridge.dylib
+  /opt/homebrew/Cellar/llama.cpp/9620/lib/libllama.0.0.9620.dylib     <-- not ours
+  /opt/homebrew/Cellar/ggml/0.15.1/lib/libggml-base.0.15.1.dylib      <-- not ours
+```
+
+A closure pinned to **b9371** ran on **b9620**, produced a correct answer, and reported the
+pinned version string. Nothing raised. On a machine with no system llama.cpp the identical
+closure simply fails to load.
+
+So the requirement is not "a broken closure fails loudly" — it is that the names must be
+right, because a wrong name is an *unpinned engine*, not an error. Go's `Fetch` already
+handled this (`fetch.go:156`); the Python port now does too, with a regression test that also
+pins the `extractall` behaviour being worked around.
 
 This is why the requirement is written as **name completeness** rather than link preservation.
 The bridge resolves siblings by name at load time; whether a name is a link or a copy is an
