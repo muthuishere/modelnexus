@@ -24,7 +24,7 @@ const LlamaTag = "b9371"
 // added entry points against the same llama.cpp b9371. Keyed on LlamaTag alone, a
 // user who fetched 0.1.0 natives would keep a cache that looks valid forever and
 // would never re-fetch — a new binding silently loading an old library.
-const BridgeVersion = "0.2.0"
+const BridgeVersion = "0.2.1"
 
 // nativesRepo is where the tier-1 workflow parks the per-platform native closure.
 const nativesRepo = "muthuishere/modelnexus"

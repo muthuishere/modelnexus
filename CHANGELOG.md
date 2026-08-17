@@ -6,6 +6,46 @@ time.
 
 ## Unreleased
 
+## 0.2.1 — 2026-08-17
+
+**Windows actually works now.** 0.2.0 shipped a Windows native that had only ever been
+*compiled*, never run. Running it on a real Windows 11 machine — both x64 and ARM64 — found
+three separate faults, each of which a green CI run had hidden.
+
+### Fixed
+
+- **The native could not load a model on Windows.** Trivial calls worked; loading a GGUF died
+  with `0xC0000409` every time. The cause was a static CRT combined with separate DLLs:
+  `llamabridge.dll`, `llama.dll` and `ggml*.dll` each linked their own copy of the runtime and
+  therefore each got their **own heap**, so memory allocated in one and freed in another
+  corrupted it. llama and ggml are now linked **into** the bridge on Windows: one DLL, one
+  runtime, one heap.
+- **The native needed the Visual C++ Redistributable**, which a clean Windows does not have. It
+  failed with "The specified module could not be found", naming a DLL that was present — the
+  missing module was `VCRUNTIME140.dll`. The runtime is now linked statically, so nothing needs
+  installing.
+- **The Go binding did not compile for Windows at all.** It called `purego.Dlopen`, which is
+  Unix-only, so `GOOS=windows go build` failed outright. We published a Go module and a Windows
+  native that could never have met.
+
+### Added
+
+- **`windows-aarch64` native.** Windows on ARM had no usable path: Node is a native arm64
+  process and refuses an x64 DLL outright, while Go runs x64-emulated and crashed inside
+  llama.cpp. Every Copilot+ PC and every Parallels VM on an Apple Silicon Mac is this platform.
+  llama.cpp rejects MSVC on ARM, so it builds with clang-cl.
+
+### Verified
+
+Both suites, natively, on Windows ARM64 — arm64 Go, arm64 Node, arm64 native, no emulation:
+
+| | result |
+|---|---|
+| Go | 27 pass, 2 skip (reranker and LoRA models absent), 0 fail · `go vet` clean |
+| JS | 27 pass, 1 skip (reranker absent), 0 fail |
+
+macOS is unchanged: C 27, Go 28, Python 26, JS 28, C# 24, cross-binding AGREE.
+
 ### Breaking
 
 Both of these change an exported C signature, so **every binding changes**. They are being taken

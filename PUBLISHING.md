@@ -154,6 +154,21 @@ fails at first use:
   gh release upload natives-b9371 natives-darwin-x86_64.zip --clobber`
   (this is the pattern mochallama already uses for the same platform).
 
-## Not verified
+## Windows — verified, at last
 
-- **No release has been cut**, so the workflows have not run end to end.
+`natives.yml` going green only ever proved the Windows bridge **compiled**. As of 0.2.1 it has
+been **run**, on a real Windows 11 machine, in both architectures:
+
+| | result |
+|---|---|
+| Go (arm64) | 27 pass, 2 skip, 0 fail · `go vet` clean |
+| JS (arm64) | 27 pass, 1 skip, 0 fail |
+
+Skips are the reranker and LoRA models, which were not on that machine.
+
+That exercise found three faults CI could not: the native could not load a model at all
+(separate DLLs + static CRT = separate heaps), it required a Visual C++ Redistributable a clean
+Windows does not have, and the Go binding did not compile for Windows in the first place.
+
+**Read what reached the user, never what the job said.** That is the whole lesson of 0.2.1, and
+it is the same one the stale-natives and never-enabled-Pages failures taught the day before.

@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 # namespaced under the author's handle, mirroring the npm scope @muthuishere/modelnexus.
 # The IMPORT is unaffected: `import modelnexus`.
 name = "muthuishere-modelnexus"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local LLM inference in your own process — llama.cpp via a C ABI. No daemon, no port."
 readme = "README.md"
 requires-python = ">=3.9"

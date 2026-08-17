@@ -68,7 +68,7 @@ target_include_directories(llamabridge
 )
 
 target_compile_definitions(llamabridge PRIVATE
-    LLB_BRIDGE_VERSION="0.2.0"
+    LLB_BRIDGE_VERSION="0.2.1"
     LLB_LLAMA_TAG="b9371"
 )
 
