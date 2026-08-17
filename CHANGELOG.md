@@ -6,6 +6,47 @@ time.
 
 ## Unreleased
 
+### Added
+
+- **Intel macOS is a supported platform again.** `darwin-x86_64` was in neither the build
+  matrix nor any release — GitHub's Intel runners queue indefinitely, so it was meant to be
+  seeded by hand, which in practice meant nobody had it. It is now cross-built on the Apple
+  Silicon runner, and CI verifies it by running it under Rosetta and generating a token, not by
+  inspecting its architecture. If you are on an Intel Mac, `pip install` and `npm install` now
+  give you a working library.
+- **Bundle the native library into a Go program**, with no network access at load time:
+
+  ```go
+  import _ "github.com/muthuishere/modelnexus/natives"
+  ```
+
+  Nothing else in your code changes. Useful for containers, air-gapped machines, and anywhere a
+  first-run download is unacceptable. It is a separate module because it costs ~70 MB in your
+  module cache; skip the import and you pay nothing. Your binary carries only its own platform.
+
+  "Bundled" means no network, not no filesystem: the library is written to your cache directory
+  (or `MODELNEXUS_CACHE`) once before it is opened.
+
+### Fixed
+
+- **A release could publish a package with no library in it.** A platform whose native was not
+  staged was silently skipped, the job stayed green, and the failure reached a user at import
+  time. A missing platform now fails the release.
+
+### Changed
+
+- All bindings resolve the native library through the same four steps in the same order:
+  `MODELNEXUS_LIB`, a bundled closure, the repository's `core/dist/`, then a download. An
+  explicit `MODELNEXUS_LIB` still wins over everything, including a bundle.
+
+### Not done yet
+
+- **`linux-aarch64` still does not exist** — not in the build matrix, not in any release,
+  despite ADR-0007 claiming it. Most cloud instances are ARM Linux. Adding a supported platform
+  needs its own decision; tracked in `openspec/changes/bundle-natives-everywhere/tasks.md`.
+- Python, JS and C# do not yet honour `MODELNEXUS_LIB` or fall back to a download; only Go has
+  all four resolution steps today. Tracked in the same file.
+
 ## 0.2.1 — 2026-08-17
 
 **Windows actually works now.** 0.2.0 shipped a Windows native that had only ever been

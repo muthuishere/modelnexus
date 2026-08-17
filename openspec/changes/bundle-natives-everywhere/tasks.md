@@ -38,6 +38,17 @@
       every step tried and why each missed
 - [x] 3.6 Confirm `bindings/go`'s `go.mod` gains no dependency on the natives module
 
+## 3b. Release the natives module
+
+- [x] 3b.1 `release.yml` stages all five closures and pushes `natives/vX.Y.Z`
+- [x] 3b.2 The payload commit is made on a DETACHED HEAD and only the tag is pushed, so `main`
+      never carries ~70 MB per llama.cpp bump
+- [x] 3b.3 The `replace` directive is stripped and the binding pinned to the released version;
+      the job fails if a `replace` survives
+- [x] 3b.4 `stage.sh --require-all` refuses a partial set — a module published with four of
+      five closures fails at import on the fifth and nothing earlier would say so
+- [x] 3b.5 `publish-go-natives` runs after `publish-go`, since it requires that tag to resolve
+
 ## 4. Python and JS reach the steps they are missing
 
 - [ ] 4.1 Python honours `MODELNEXUS_LIB` first
@@ -60,7 +71,7 @@
 
 - [ ] 6.1 Document the four-step order once, in the shared docs, not three times per binding
 - [ ] 6.2 Go README: the one-line opt-in and what the ~70 MB buys
-- [ ] 6.3 CHANGELOG under `## Unreleased`, written as what a user gets
+- [x] 6.3 CHANGELOG under `## Unreleased`, written as what a user gets
 - [ ] 6.4 State plainly that "bundled" means no network, not no filesystem — a read-only home
       directory is a real failure mode and the error must name the directory it tried
 

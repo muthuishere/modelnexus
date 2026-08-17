@@ -157,6 +157,15 @@ fails at first use:
 - **A missing platform now FAILS the release** rather than being skipped. A silent skip is how
   a package ships with no library in it: the job stays green and the failure lands on a user at
   import time.
+- **The Go natives bundle is published on a TAG ONLY.** `release.yml` stages the five closures
+  into `natives/payload/`, commits on a detached HEAD, and pushes `natives/vX.Y.Z` without ever
+  pushing that commit to a branch. So `main` never carries ~70 MB per llama.cpp bump, and
+  `git log` / `git blame` / an ordinary checkout stay unaffected.
+
+  The blobs are still reachable from the tag — unavoidable in one repository, and the cost
+  ADR-0010 accepted explicitly. **Deleting an old `natives/v*` tag makes them collectable**,
+  which would not be true of a commit on `main`. The Go module proxy keeps serving versions it
+  has already cached, so pruning old tags does not break existing consumers.
 
 ## Windows — verified, at last
 

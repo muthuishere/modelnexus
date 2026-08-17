@@ -114,17 +114,70 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Tag the Go submodule
+      - name: Tag the Go binding
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
-          # Go publishes by tag; there is nothing to upload. The natives are NOT in the
-          # module (ADR-0007) -- the binding resolves them at runtime.
+          # Go publishes by tag; there is nothing to upload. The base binding carries
+          # no natives -- it resolves them at runtime, or from the natives module a
+          # consumer opted into (ADR-0010).
           tag="bindings/go/v${{ needs.preflight.outputs.version }}"
           if git ls-remote --tags origin | grep -q "refs/tags/$tag$"; then
             echo "$tag already exists; nothing to do (idempotent)"
           else
             git tag "$tag" && git push origin "$tag"
           fi
+
+  publish-go-natives:
+    # After the binding: the natives module REQUIRES it at this exact version, and a
+    # tag Go cannot resolve is worse than no tag.
+    needs: [preflight, natives, publish-go]
+    if: vars.ENABLE_GO == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with: { name: natives, path: zips }
+      - name: Unzip the closures (zip preserves the symlinks the bundle needs)
+        run: mkdir -p staged && for z in zips/*.zip; do unzip -qo "$z" -d staged; done
+
+      - name: Publish the natives module ON A TAG ONLY, never on a branch
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          set -e
+          version="${{ needs.preflight.outputs.version }}"
+          tag="natives/v$version"
+          if git ls-remote --tags origin | grep -q "refs/tags/$tag$"; then
+            echo "$tag already exists; nothing to do (idempotent)"; exit 0
+          fi
+
+          ./natives/stage.sh staged --require-all
+
+          # The published module must resolve the real binding from the proxy. The
+          # replace directive exists so the two modules can be developed together;
+          # shipping it would make the module uninstallable for everyone else.
+          sed -i '/^replace /d; /^\/\/ Local development:/d' natives/go.mod
+          sed -i "s|^require github.com/muthuishere/modelnexus/bindings/go .*|require github.com/muthuishere/modelnexus/bindings/go v$version|" natives/go.mod
+          # `grep -q ... && { exit 1; }` would be a set -e landmine: grep exits 1 when
+          # it finds nothing, which is the SUCCESS case here, and the script would die.
+          if grep -q "^replace" natives/go.mod; then
+            echo "::error::a replace directive survived into the published module"; exit 1
+          fi
+          cat natives/go.mod
+
+          # Detached HEAD, tag, push the TAG. The commit is never pushed to a branch,
+          # so main's history and every ordinary checkout stay free of ~70 MB per
+          # llama.cpp bump. The blobs are still reachable from the tag -- that is
+          # unavoidable in one repo (ADR-0010) -- but deleting an old natives tag
+          # makes them collectable, which is not true of a commit on main.
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --detach
+          git add -f natives/payload natives/go.mod
+          git commit -q -m "natives: closure payload for $version (llama.cpp ${{ needs.preflight.outputs.llama_tag }})"
+          git tag "$tag"
+          git push origin "$tag"
+          echo "published $tag ($(du -sh natives/payload | cut -f1))"
 
   publish-pypi:
     needs: [preflight, natives]
