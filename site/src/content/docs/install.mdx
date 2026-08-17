@@ -51,14 +51,36 @@ Three ways it reaches you, one per ecosystem ([ADR-0007](https://github.com/muth
 In Go, download it once and point the loader at it:
 
 ```go
-dir, err := modelnexus.Fetch()      // ~14 MB into the OS user cache, once
-if err != nil { log.Fatal(err) }
-os.Setenv("MODELNEXUS_LIB", dir)    // the loader does not read the cache on its own
+if _, err := modelnexus.Fetch(); err != nil { log.Fatal(err) }
+chat, err := modelnexus.Open("model.gguf")   // the cache is searched automatically
 ```
 
-Published platforms: **linux-x86_64, darwin-aarch64, windows-x86_64**. Intel macOS is
-staged by hand, not built in CI — GitHub's Intel runners queue indefinitely and one job
-that never starts blocks the publish for every platform that did.
+You do not have to pass the path anywhere. Until 0.2.1 you did — `Fetch()` downloaded the
+library, returned a directory, and the next `Open` still failed unless you fed it back through
+`MODELNEXUS_LIB`. That was half a feature and it is fixed.
+
+## Platforms
+
+| platform | published | run |
+|---|---|---|
+| `darwin-aarch64` | yes | continuously |
+| `linux-x86_64` | yes | continuously |
+| `windows-x86_64` | yes | verified on real hardware, 0.2.1 |
+| `windows-aarch64` | yes, since 0.2.1 | **both suites, natively** — Go 27 pass / JS 27 pass |
+| `darwin-x86_64` | staged by hand | not in CI |
+
+**Windows on ARM matters more than it sounds.** Every Copilot+ PC is one, and so is a Parallels
+VM on an Apple Silicon Mac. Before 0.2.1 there was no usable path on that hardware at all: Node
+is a native arm64 process and refuses an x64 DLL outright, and Go runs x64-emulated, so it
+loaded the library and then died inside llama.cpp.
+
+Intel macOS is staged by hand rather than built in CI — GitHub's Intel runners queue
+indefinitely, and one job that never starts blocks the publish for every platform that did.
+
+**On Windows the native is a single self-contained DLL.** llama, ggml and the C runtime are all
+linked in, so there is nothing to install alongside it — no Visual C++ Redistributable, no
+sibling libraries to keep together. 0.2.0 needed the redistributable and said so only by failing
+with "The specified module could not be found", naming a file that was right there.
 
 CPU and Metal. No CUDA in the published builds.
 

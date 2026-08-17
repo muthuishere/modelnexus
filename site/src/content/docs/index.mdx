@@ -171,6 +171,8 @@ Same behaviour, native shape.
 
 ## Honest limits
 
+- **macOS, Linux and Windows** — including **Windows on ARM**, where both the Go and JS suites
+  run natively rather than emulated. Intel macOS is staged by hand.
 - **CPU and Metal.** No CUDA in the published builds yet.
 - **GGUF only**, because there is exactly one inference runtime underneath (llama.cpp) and
   that is a deliberate, permanent choice.

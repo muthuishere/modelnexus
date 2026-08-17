@@ -87,6 +87,13 @@ the released natives are not.
 **Single-threaded.** Every measurement is one thread. Whether one context can be driven from
 N host threads is untested, and the likely answer is "no — serialise at the bridge".
 
+**Windows was compiled but not run until 0.2.1.** CI had been green on every version of it, and
+green meant *it built*. Running it on real hardware found three separate faults: the native
+could not load a model at all, it needed a Visual C++ Redistributable a clean Windows does not
+have, and the Go binding did not compile for Windows in the first place. All three are fixed,
+and both suites now run natively on Windows ARM64 — but the lesson is worth keeping: **a green
+build is not a working artifact**.
+
 **Numbers are from a 1.5B model on an M-series Mac.** The cache-reuse and batching gaps
 should widen with model size. That is an argument from mechanism, not a measurement, and it
 is stated as such.
