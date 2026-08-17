@@ -64,7 +64,7 @@ job said.
 | leg | state |
 |---|---|
 | **Go** | **PUBLISHED and verified.** `go get github.com/muthuishere/modelnexus/bindings/go@v0.1.0` from the public proxy, `Fetch()` pulls natives from the `natives-b9371` release, inference runs. Needs no credential — it is a tag push using `github.token`. |
-| **npm** | Blocked: `npm error code ENEEDAUTH`. |
+| **npm** | Blocked: `npm error code ENEEDAUTH`. **The first publish cannot come from CI** — npm's trusted publishing is configured on a package's settings page, so it requires the package to already exist, and there is no pending-publisher equivalent (PyPI has one; npm does not). Bootstrap once with `scripts/npm-first-publish.sh`, from a machine that is already `npm login`ed, then configure trusted publishers and let CI do every release after that. **No token is ever stored in GitHub.** |
 | **PyPI** | Blocked: `invalid-publisher: valid token, but no corresponding publisher`. The OIDC token is fine; PyPI has nothing registered to match it. |
 
 Natives are staged for **linux-x86_64, darwin-aarch64, darwin-x86_64, windows-x86_64,

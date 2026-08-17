@@ -48,3 +48,6 @@ spikes/0009-bundle-natives/*/probe.bin
 # workflow into the tagged commit (ADR-0010).
 natives/payload/*/*
 !natives/payload/*/PLACEHOLDER
+
+# Scratch for the one-time npm bootstrap (scripts/npm-first-publish.sh).
+.npm-first-publish/

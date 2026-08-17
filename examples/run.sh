@@ -17,6 +17,7 @@ set -euo pipefail
 #   MODELNEXUS_LORA       the adapter itself              (lora)
 #
 # Run one language with: examples/run.sh go | python | js
+# Run the integration examples with: examples/run.sh integrations
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd -- "$here/.." && pwd)
@@ -86,6 +87,44 @@ run_all() {
   run "$lang" lora MODELNEXUS_LORA_BASE MODELNEXUS_LORA
 }
 
+# ---------------------------------------------------------------- integrations
+#
+# modelnexus behind somebody else's library. These are SEPARATE from the list above
+# for two reasons that both matter:
+#
+#   1. Each is its own Go module, because it pulls a dependency the other examples
+#      have no business acquiring. `go run ./name` from examples/go cannot reach them.
+#   2. They prove a different claim. The eight above show what modelnexus does; these
+#      show that a general-purpose library can drive it with no knowledge of it, and
+#      that neither side depends on the other (ADR-0003).
+#
+# They are run against the PUBLISHED integration library, never a local checkout --
+# otherwise they prove something about a working tree rather than about a release.
+run_module() {
+  local name=$1 desc=$2
+  shift 2
+  local missing=()
+  for var in "$@"; do have "$var" || missing+=("$var"); done
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo
+    echo "SKIP  integrations/$name — needs a model at ${missing[*]}"
+    skipped=$((skipped + 1))
+    skipped_names+=("integrations/$name (${missing[*]})")
+    return 0
+  fi
+  echo
+  echo "================================================================"
+  echo "  integrations/$name — $desc"
+  echo "================================================================"
+  (cd "$here/go/$name" && CGO_ENABLED=0 go run .)
+  ran=$((ran + 1))
+}
+
+run_integrations() {
+  run_module toolnexus "an agent with tools, model in this process" MODELNEXUS_MODEL
+  run_module citenexus "embeddings and grounded answers" MODELNEXUS_MODEL
+}
+
 if [ "$only" = "all" ] || [ "$only" = "js" ]; then
   # The examples depend on the binding in this tree through a file: link, so the install
   # is local and offline. Do it once, before any JS example runs.
@@ -93,9 +132,10 @@ if [ "$only" = "all" ] || [ "$only" = "js" ]; then
 fi
 
 case "$only" in
-  all) run_all go; run_all python; run_all js ;;
+  all) run_all go; run_all python; run_all js; run_integrations ;;
   go | python | js) run_all "$only" ;;
-  *) echo "usage: run.sh [all|go|python|js]" >&2; exit 2 ;;
+  integrations) run_integrations ;;
+  *) echo "usage: run.sh [all|go|python|js|integrations]" >&2; exit 2 ;;
 esac
 
 echo
