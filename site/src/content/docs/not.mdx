@@ -87,6 +87,29 @@ the released natives are not.
 **Single-threaded.** Every measurement is one thread. Whether one context can be driven from
 N host threads is untested, and the likely answer is "no — serialise at the bridge".
 
+**Not bit-identical across architectures.** Same machine, every binding agrees byte for byte —
+that is what the parity gate enforces. Across *different* CPUs it does not, and cannot: the
+compute kernels differ between backends, so logits land a few thousandths apart.
+
+Measured by running the same examples on macOS arm64 and Windows arm64, same model, same seed:
+
+| example | result |
+|---|---|
+| hello, counting, structured, streaming | **identical**, byte for byte |
+| rerank | same ranking, scores differ — `−0.167` vs `−0.204` |
+| embeddings | same structure, cosine differs at the third decimal — `0.932` vs `0.928` |
+| conversation | **replies diverged from turn 2**, at temperature 0 with a fixed seed |
+
+That last row is the one worth understanding, because it looks like randomness and is not.
+Greedy decoding takes the argmax; when two tokens are within a thousandth of each other, a
+different backend picks the other one. From there the conversation grows differently and every
+later token count shifts. Short generations matched exactly precisely because they gave that
+fewer chances to happen.
+
+So: **rank on the order, assert on the structure, and never build a golden-file test that
+expects identical text across platforms.** Inside one machine you can; across machines you
+cannot, and no amount of seeding changes it.
+
 **Windows was compiled but not run until 0.2.1.** CI had been green on every version of it, and
 green meant *it built*. Running it on real hardware found three separate faults: the native
 could not load a model at all, it needed a Visual C++ Redistributable a clean Windows does not

@@ -115,7 +115,10 @@ assume result *i* is document *i*.
 - Not comparable across models. A different reranker has a different scale.
 - Not a probability. Do not threshold at 0.5, and do not show it to a user as a percentage.
 - Negative is normal. Verified across all bindings on one query: `+6.591`, `−5.161`,
-  `−11.004` — same model, same three documents, byte-identical in every language.
+  `−11.004` — same model, same three documents, byte-identical in every language **on one
+  machine**. Across architectures the ranking is the same and the numbers are not: the same
+  five documents scored `−0.167 / −5.599 / −7.734` on an M-series Mac and
+  `−0.204 / −5.534 / −7.817` on Windows ARM64. Rank on the order, never on the digits.
 
 If you need a cutoff, calibrate one on your own data against your own model, and re-do it
 when you change either.

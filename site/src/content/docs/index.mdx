@@ -162,7 +162,8 @@ try to stay in sync. Every capability lives in the C surface and appears in ever
 it does not ship.
 
 That is testable, so it is tested: all three bindings run the same schema-constrained request
-and must return **byte-identical text and an identical token count**. A binding that quietly
+and must return **byte-identical text and an identical token count** *on the same machine*.
+A binding that quietly
 reshapes a result fails that gate while passing its own suite.
 
 Each binding is still idiomatic. Go returns `(T, error)` and honours a cancelled

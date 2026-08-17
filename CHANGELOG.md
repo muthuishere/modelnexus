@@ -35,6 +35,16 @@ three separate faults, each of which a green CI run had hidden.
   llama.cpp. Every Copilot+ PC and every Parallels VM on an Apple Silicon Mac is this platform.
   llama.cpp rejects MSVC on ARM, so it builds with clang-cl.
 
+### Documented
+
+- **Results are not bit-identical across architectures**, and the docs now say so. Every binding
+  agrees byte for byte on one machine — that is what the parity gate enforces — but across CPUs
+  the kernels differ and logits land a few thousandths apart. Measured on macOS arm64 vs Windows
+  arm64 with the same model and seed: hello, counting, structured and streaming identical;
+  rerank same ranking with different scores (`−0.167` vs `−0.204`); and the conversation example
+  **diverged from turn 2 at temperature 0 with a fixed seed**, because greedy decoding turns a
+  near-tie into a different token. Rank on the order, never on the digits.
+
 ### Verified
 
 Both suites, natively, on Windows ARM64 — arm64 Go, arm64 Node, arm64 native, no emulation:

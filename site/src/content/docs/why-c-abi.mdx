@@ -88,7 +88,7 @@ afternoon. Two signature changes were taken deliberately before any external con
 closes the day this site ships.
 
 Bindings that cannot drift is a claim, so it is tested: every binding runs the same
-schema-constrained request and must return **byte-identical text and an identical token
+schema-constrained request and must return, **on the same machine**, byte-identical text and an identical token
 count**. A binding that quietly reshapes a result fails that gate while passing its own suite.
 
 The ABI decides the shape. The model decides everything else.
