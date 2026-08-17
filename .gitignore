@@ -32,3 +32,12 @@ bindings/python/*.egg-info/
 site/node_modules/
 site/dist/
 site/.astro/
+
+# Spike 0009 artifacts: embedded native payloads and cross-build output. Evidence,
+# not source -- regenerate with spikes/0009-bundle-natives/cross-darwin-x64.sh.
+spikes/0009-bundle-natives/dist/
+spikes/0009-bundle-natives/build/
+spikes/0009-bundle-natives/llama-prebuilt/
+spikes/0009-bundle-natives/*/native/
+spikes/0009-bundle-natives/*.bin
+spikes/0009-bundle-natives/*/probe.bin
