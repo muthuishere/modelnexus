@@ -117,6 +117,11 @@ type EmbedOptions struct {
 	// NBatch caps how many tokens one input may have; 0 means the core's default
 	// (llb_embed_create in core/include/llamabridge.h states it).
 	NBatch int
+	// NGPULayers is how many model layers to offload. Nil means ALL of them, which
+	// is the core's default. A pointer rather than an int because 0 is a REAL
+	// value meaning "CPU only" -- the one someone sets deliberately -- and
+	// zero-means-unset would silently hand them the GPU they declined.
+	NGPULayers *int
 	// OnEvent receives lifecycle events during load.
 	OnEvent func(string)
 }
@@ -152,6 +157,9 @@ func OpenEmbedder(ggufPath string, opts *EmbedOptions) (*Embedder, error) {
 	}
 	if opts.NBatch > 0 {
 		config["n_batch"] = opts.NBatch
+	}
+	if opts.NGPULayers != nil {
+		config["n_gpu_layers"] = *opts.NGPULayers
 	}
 	// "" is NULL to the ABI, and NULL means "every default, exactly as before the
 	// parameter existed". An empty object is not the same request -- see Open.

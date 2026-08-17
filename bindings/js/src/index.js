@@ -117,8 +117,13 @@ function serialize(request) {
 export class Chat {
   /**
    * @param {string} ggufPath
-   * @param {{nCtx?: number, nBatch?: number, nSeqMax?: number,
+   * @param {{nCtx?: number, nBatch?: number, nSeqMax?: number, nGpuLayers?: number,
    *          onEvent?: (event: string) => void}} [options]
+   *
+   * `nGpuLayers` is how many model layers are offloaded to the GPU. Unset means ALL
+   * of them, which is the core's default and almost always what you want. Pass 0 for
+   * CPU only -- a real setting rather than "unset", for a measurement that must be
+   * reproducible across machines, or to leave the GPU for something else.
    */
   constructor(ggufPath, options = {}) {
     this._lib = lib();
@@ -142,6 +147,11 @@ export class Chat {
     if (options.nCtx !== undefined) config.nCtx = options.nCtx;
     if (options.nBatch !== undefined) config.nBatch = options.nBatch;
     if (options.nSeqMax !== undefined) config.nSeqMax = options.nSeqMax;
+    // `!== undefined`, never a truthy test: 0 is a legitimate nGpuLayers meaning
+    // "CPU only", and dropping it would silently hand the caller the GPU instead.
+    // The name is nGpuLayers, not nGPULayers, because toWire lowercases each capital
+    // on its own -- nGPULayers would cross the wire as `n_g_p_u_layers`.
+    if (options.nGpuLayers !== undefined) config.nGpuLayers = options.nGpuLayers;
     const configJson = Object.keys(config).length ? serialize(config) : null;
 
     const handle = this._lib.chatCreate(ggufPath, configJson, this._eventCb, null);
@@ -318,7 +328,10 @@ export class Embedder {
   /**
    * @param {string} ggufPath
    * @param {{pooling?: 'mean'|'cls'|'last'|'rank'|'none', nCtx?: number, nBatch?: number,
-   *          onEvent?: (event: string) => void}} [options]
+   *          nGpuLayers?: number, onEvent?: (event: string) => void}} [options]
+   *
+   * `nGpuLayers` behaves exactly as it does on Chat: unset means all layers, and 0
+   * is CPU only -- a deliberate setting, not "unset".
    */
   constructor(ggufPath, options = {}) {
     this._lib = lib();
@@ -338,6 +351,8 @@ export class Embedder {
     if (options.pooling !== undefined) config.pooling = options.pooling;
     if (options.nCtx !== undefined) config.nCtx = options.nCtx;
     if (options.nBatch !== undefined) config.nBatch = options.nBatch;
+    // Same rule as Chat: 0 means CPU only, not unset.
+    if (options.nGpuLayers !== undefined) config.nGpuLayers = options.nGpuLayers;
     const configJson = Object.keys(config).length ? serialize(config) : null;
 
     const handle = this._lib.embedCreate(ggufPath, configJson, this._eventCb, null);

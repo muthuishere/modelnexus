@@ -96,6 +96,36 @@ public class BindingTests
             defaulted.Infer(new[] { new Message("user", "hi") }, maxTokens: 8).Type);
     }
 
+    /// <summary>The config the CORE received, observed through its own event.</summary>
+    private static JsonElement CreatedConfig(int? nGpuLayers)
+    {
+        var seen = "null";
+        void Capture(string e)
+        {
+            const string prefix = "create_config:";
+            if (e.StartsWith(prefix, StringComparison.Ordinal)) seen = e[prefix.Length..];
+        }
+        using (new Chat(Model!, nGpuLayers: nGpuLayers, onEvent: Capture)) { }
+        return JsonDocument.Parse(seen).RootElement;
+    }
+
+    [SkippableFact]
+    public void GpuLayersIsAbsentUnlessAskedFor()
+    {
+        Skip.IfNoModel();
+        Assert.Equal(JsonValueKind.Null, CreatedConfig(null).ValueKind);
+    }
+
+    [SkippableFact]
+    public void GpuLayersZeroIsSentRatherThanReadAsUnset()
+    {
+        // The assertion that matters. 0 means "CPU only" and is a deliberate request;
+        // a `> 0` check would drop it and quietly hand the caller the GPU instead.
+        Skip.IfNoModel();
+        var config = CreatedConfig(0);
+        Assert.Equal(0, config.GetProperty("n_gpu_layers").GetInt32());
+    }
+
     [SkippableFact]
     public void CountTokensReportsAPlausibleCountAndTheWindow()
     {

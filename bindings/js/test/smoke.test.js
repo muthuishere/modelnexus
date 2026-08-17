@@ -389,6 +389,34 @@ test('a missing model is a typed error', () => {
   );
 });
 
+describe('gpu layers', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
+  /** The config the CORE received, observed through its own event. */
+  function createdConfig(options) {
+    let seen = 'null';
+    const c = new Chat(MODEL, {
+      ...options,
+      onEvent: (e) => {
+        if (e.startsWith('create_config:')) seen = e.slice('create_config:'.length);
+      },
+    });
+    try {
+      return JSON.parse(seen);
+    } finally {
+      c.close();
+    }
+  }
+
+  test('is absent unless asked for', () => {
+    assert.equal(createdConfig({}), null);
+  });
+
+  test('0 is sent rather than read as unset', () => {
+    // The assertion that matters. 0 means "CPU only" and is a deliberate request;
+    // a truthy check would drop it and quietly hand the caller the GPU instead.
+    assert.deepEqual(createdConfig({ nGpuLayers: 0 }), { n_gpu_layers: 0 });
+  });
+});
+
 describe('embeddings', { skip: hasModel ? false : 'set MODELNEXUS_MODEL' }, () => {
   test('no options sends no config, rather than a default this binding invented', () => {
     // Observed at the core, not self-reported. This used to send {"n_batch":512}

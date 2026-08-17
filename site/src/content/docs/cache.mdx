@@ -18,7 +18,7 @@ modelnexus keeps what it already computed. Measured on a 1.5B model, `n_ctx=8192
 | 8 | 374 tok | 54.7 ms | 25.1 ms | 327 | 2.2× |
 | 16 | 757 tok | 121.5 ms | 26.1 ms | 709 | 4.7× |
 | 24 | 1141 tok | 190.2 ms | 26.6 ms | 1093 | 7.2× |
-| 32 | 1525 tok | 247.2 ms | 27.3 ms | 1477 | **9.0×** |
+| 32 | 1525 tok | 247.2 ms | 27.3 ms | 1477 | **9.0×** *(CPU)* |
 
 Total prefill over the 32 turns: **4198 ms → 829 ms**, and the gap was still widening when
 the run ended.
@@ -109,3 +109,17 @@ exposed. They are additive later and need no ABI break, which is why `n_seq_max`
 exists as a create-time option that does nothing yet.
 
 [Counting tokens →](/modelnexus/counting/)
+
+
+## These numbers depend on the GPU
+
+The table above was measured **CPU-only**. With the GPU doing the work — which is the default
+since 0.2.1 — prefill is cheap enough that re-reading costs less, so the ratio narrows:
+
+| | 32 turns, re-read every turn | with reuse | |
+|---|---|---|---|
+| GPU (Metal) | 5.09 s | **2.30 s** | 2.2× |
+| CPU only | 71.9 s | **6.91 s** | 10.4× |
+
+Reuse is worth most where you have least: on CPU, on a bigger model, and in a longer
+conversation. Set `n_gpu_layers: 0` if you want the CPU numbers reproducibly.

@@ -26,8 +26,10 @@ if (args.Length >= 2 && args[0] == "--create-config")
     Probe("chat-none",  () => new Chat(m, onEvent: Capture));
     Probe("chat-ctx",   () => new Chat(m, nCtx: 2048, onEvent: Capture));
     Probe("chat-full",  () => new Chat(m, nCtx: 2048, nBatch: 256, nSeqMax: 1, onEvent: Capture));
+    Probe("chat-gpu0",  () => new Chat(m, nGpuLayers: 0, onEvent: Capture));
     Probe("embed-none", () => new Embedder(m, onEvent: Capture));
     Probe("embed-pool", () => new Embedder(m, pooling: Pooling.Mean, onEvent: Capture));
+    Probe("embed-gpu0", () => new Embedder(m, nGpuLayers: 0, onEvent: Capture));
     return 0;
 }
 

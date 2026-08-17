@@ -368,6 +368,19 @@ def test_a_chat_sends_only_what_was_asked_for():
     assert json.loads(created_config(mx.Chat, n_ctx=2048)) == {"n_ctx": 2048}
 
 
+def test_gpu_layers_is_absent_unless_asked_for():
+    # Unset must not reach the core at all: the core's default is every layer, and a
+    # binding that sent a number here would pin it the day the core moves.
+    assert json.loads(created_config(mx.Chat)) is None
+
+
+def test_gpu_layers_zero_is_sent_rather_than_read_as_unset():
+    # The assertion that matters. 0 means "CPU only" and is a deliberate request; a
+    # truthiness check would drop it and quietly hand the caller the GPU instead.
+    assert json.loads(created_config(mx.Chat, n_gpu_layers=0)) == {"n_gpu_layers": 0}
+    assert json.loads(created_config(mx.Embedder, n_gpu_layers=0)) == {"n_gpu_layers": 0}
+
+
 def lora_pair() -> tuple[str, str]:
     """A base model and a LoRA adapter built for it, or skip.
 

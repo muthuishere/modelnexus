@@ -260,9 +260,15 @@ public sealed class Chat : IDisposable
     /// accepted now because create-time parameters are the only ones that cannot be added
     /// later through request JSON without breaking the ABI.
     /// </para>
+    /// <para>
+    /// <paramref name="nGpuLayers"/> is how many model layers are offloaded to the GPU.
+    /// Unset means ALL of them, which is the core's default and almost always what you
+    /// want. Pass 0 for CPU only — a real setting rather than "unset", for a measurement
+    /// that must be reproducible across machines, or to leave the GPU for something else.
+    /// </para>
     /// </remarks>
     public Chat(string ggufPath, int? nCtx = null, int? nBatch = null, int? nSeqMax = null,
-                Action<string>? onEvent = null)
+                int? nGpuLayers = null, Action<string>? onEvent = null)
     {
         _eventCallback = (ptr, _) =>
         {
@@ -275,6 +281,9 @@ public sealed class Chat : IDisposable
         if (nCtx is not null) config["n_ctx"] = nCtx;
         if (nBatch is not null) config["n_batch"] = nBatch;
         if (nSeqMax is not null) config["n_seq_max"] = nSeqMax;
+        // `is not null`, not `> 0`: 0 is a legitimate nGpuLayers meaning "CPU only",
+        // and folding it into "unset" would silently hand the caller the GPU instead.
+        if (nGpuLayers is not null) config["n_gpu_layers"] = nGpuLayers;
         var configJson = config.Count > 0 ? JsonSerializer.Serialize(config, Json.Options) : null;
 
         _handle = Native.ChatCreate(ggufPath, configJson, _eventCallback, IntPtr.Zero);
@@ -485,9 +494,15 @@ public sealed class Embedder : IDisposable
     /// The binding states no number of its own -- a default restated here is a second
     /// place it can drift from.
     /// </param>
+    /// <param name="nGpuLayers">
+    /// How many model layers are offloaded to the GPU. Unset means ALL of them, the
+    /// core's default. 0 is CPU only — a deliberate setting, not "unset", which is why
+    /// this is nullable while <paramref name="nCtx"/> is not.
+    /// </param>
     /// <param name="onEvent">Receives the core's lifecycle events during load.</param>
     public Embedder(string ggufPath, Pooling pooling = Pooling.Default,
-                    int nCtx = 0, int nBatch = 0, Action<string>? onEvent = null)
+                    int nCtx = 0, int nBatch = 0, int? nGpuLayers = null,
+                    Action<string>? onEvent = null)
     {
         _eventCallback = (ptr, _) =>
         {
@@ -500,6 +515,8 @@ public sealed class Embedder : IDisposable
         if (pooling != Pooling.Default) config["pooling"] = pooling.ToString().ToLowerInvariant();
         if (nCtx > 0) config["n_ctx"] = nCtx;
         if (nBatch > 0) config["n_batch"] = nBatch;
+        // `is not null` for the same reason as Chat: 0 means CPU only, not unset.
+        if (nGpuLayers is not null) config["n_gpu_layers"] = nGpuLayers;
         // Nothing set means NULL, not "{}" -- same rule as Chat above.
         var configJson = config.Count > 0 ? JsonSerializer.Serialize(config, Json.Options) : null;
 

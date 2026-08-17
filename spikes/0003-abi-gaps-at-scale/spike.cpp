@@ -42,6 +42,10 @@ static bool open_rig(Rig& r, const char* path, int n_ctx, int n_seq_max) {
     llama_backend_init();
 
     auto mp = llama_model_default_params();
+    // Offload to the GPU, matching what the bridge now does by default. The
+    // original run of this spike used llama's default of 0, so every number it
+    // produced was a CPU number -- including the 9x headline.
+    mp.n_gpu_layers = 999;
     r.model = llama_model_load_from_file(path, mp);
     if (!r.model) { fprintf(stderr, "FAIL: could not load %s\n", path); return false; }
 

@@ -184,8 +184,13 @@ func main() {
 	probe(m, "chat-none")
 	probe(m, "chat-ctx", modelnexus.WithContextSize(2048))
 	probe(m, "chat-full", modelnexus.WithContextSize(2048), modelnexus.WithBatchSize(256), modelnexus.WithMaxSequences(1))
+	// 0 is CPU-only, a legitimate value -- and the one a zero-means-unset binding
+	// silently drops, sending nothing and getting the GPU instead.
+	probe(m, "chat-gpu0", modelnexus.WithGPULayers(0))
 	probeEmbed(m, "embed-none", nil)
 	probeEmbed(m, "embed-pool", &modelnexus.EmbedOptions{Pooling: modelnexus.PoolingMean})
+	zero := 0
+	probeEmbed(m, "embed-gpu0", &modelnexus.EmbedOptions{NGPULayers: &zero})
 }
 
 func probeEmbed(model, label string, opts *modelnexus.EmbedOptions) {
@@ -226,6 +231,7 @@ m = sys.argv[1]
 probe(m, "chat-none")
 probe(m, "chat-ctx", n_ctx=2048)
 probe(m, "chat-full", n_ctx=2048, n_batch=256, n_seq_max=1)
+probe(m, "chat-gpu0", n_gpu_layers=0)
 
 def probe_embed(model, label, **kw):
     seen = []
@@ -240,6 +246,7 @@ def probe_embed(model, label, **kw):
 
 probe_embed(m, "embed-none")
 probe_embed(m, "embed-pool", pooling="mean")
+probe_embed(m, "embed-gpu0", n_gpu_layers=0)
 PYEOF
 
 cat > "$OUT/cfg.mjs" <<'JSEOF'
@@ -255,6 +262,7 @@ function probe(label, options = {}) {
 probe('chat-none')
 probe('chat-ctx', { nCtx: 2048 })
 probe('chat-full', { nCtx: 2048, nBatch: 256, nSeqMax: 1 })
+probe('chat-gpu0', { nGpuLayers: 0 })
 
 function probeEmbed(label, options = {}) {
   let seen = '<none>'
@@ -265,6 +273,7 @@ function probeEmbed(label, options = {}) {
 }
 probeEmbed('embed-none')
 probeEmbed('embed-pool', { pooling: 'mean' })
+probeEmbed('embed-gpu0', { nGpuLayers: 0 })
 JSEOF
 
 cp "$OUT/cfg.mjs" "$JS_CFG"

@@ -130,11 +130,17 @@ modelnexus keeps what is already computed and recomputes only what actually chan
 | 24 | 1141 tokens | 190.2 ms | 26.6 ms |
 | 32 | 1525 tokens | 247.2 ms | **27.3 ms** |
 
-Read the right-hand column: it does not move. Over 32 turns that is 4198 ms of prefill against
-829 ms — **9× by the last turn, and the gap was still widening when the measurement stopped.**
-On a 1.5-billion-parameter model. It gets better with a bigger one, not worse.
+Read the right-hand column: it does not move. Those are **CPU** figures, and the honest version
+is that the win depends on where you run:
 
-Output is unchanged. This is latency, and it is on by default.
+| | conversation, 32 turns | re-read every turn | modelnexus | |
+|---|---|---|---|---|
+| **GPU** (Metal, on by default) | | 5.09 s | **2.30 s** | 2.2× |
+| **CPU only** (`n_gpu_layers: 0`) | | 71.9 s | **6.91 s** | 10.4× |
+
+Both are real. The GPU is fast enough that re-reading hurts less, so reuse matters most exactly
+where you have least to spare. Output is unchanged either way — this is latency, and it is on by
+default.
 
 <CardGrid>
 	<Card title="Structured output" icon="seti:json">
@@ -174,7 +180,8 @@ Same behaviour, native shape.
 
 - **macOS, Linux and Windows** — including **Windows on ARM**, where both the Go and JS suites
   run natively rather than emulated. Intel macOS is staged by hand.
-- **CPU and Metal.** No CUDA in the published builds yet.
+- **The GPU is used by default** — all layers offloaded, overridable with `n_gpu_layers`.
+  Metal on macOS. No CUDA in the published builds yet.
 - **GGUF only**, because there is exactly one inference runtime underneath (llama.cpp) and
   that is a deliberate, permanent choice.
 - **No Java binding.** mochallama already serves the JVM.

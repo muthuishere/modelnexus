@@ -135,11 +135,17 @@ class Chat:
     Holds a native handle, so it must be closed. Use it as a context manager, or
     call :meth:`close` yourself.
 
-    ``n_ctx``, ``n_batch`` and ``n_seq_max`` are fixed when the context is built and
-    cannot be changed per request, which is why they live here and every generation
-    parameter lives on :meth:`infer`. Each is omitted from the request when left
-    unset, and the model's default applies -- the values are documented once, on
-    ``llb_chat_create`` in ``llamabridge.h``, and are not restated here.
+    ``n_ctx``, ``n_batch``, ``n_seq_max`` and ``n_gpu_layers`` are fixed when the
+    context is built and cannot be changed per request, which is why they live here
+    and every generation parameter lives on :meth:`infer`. Each is omitted from the
+    request when left unset, and the model's default applies -- the values are
+    documented once, on ``llb_chat_create`` in ``llamabridge.h``, and are not
+    restated here.
+
+    ``n_gpu_layers`` is how many model layers are offloaded to the GPU. Unset means
+    ALL of them, which is the core's default and almost always what you want.
+    ``n_gpu_layers=0`` is CPU only -- a real setting rather than "unset", used to
+    make a measurement reproducible across machines or to leave the GPU free.
     """
 
     def __init__(
@@ -149,6 +155,7 @@ class Chat:
         n_ctx: int | None = None,
         n_batch: int | None = None,
         n_seq_max: int | None = None,
+        n_gpu_layers: int | None = None,
         on_event: Callable[[str], None] | None = None,
     ) -> None:
         self._lib = load()
@@ -175,6 +182,11 @@ class Chat:
             config["n_batch"] = n_batch
         if n_seq_max is not None:
             config["n_seq_max"] = n_seq_max
+        # `is not None`, never a truthiness check: 0 is a legitimate n_gpu_layers
+        # meaning "CPU only", and collapsing it into "unset" would silently hand the
+        # caller the GPU they deliberately asked to keep out of it.
+        if n_gpu_layers is not None:
+            config["n_gpu_layers"] = n_gpu_layers
         # No keys means send NULL, not "{}" -- the core's defaults are then reached by
         # the same path they were before this parameter existed.
         config_json = json.dumps(config).encode("utf-8") if config else None
@@ -459,9 +471,13 @@ class Embedder:
             for hit in rr.rerank("capital of France?", docs):
                 print(hit["index"], hit["score"])
 
-    ``pooling``, ``n_ctx`` and ``n_batch`` are omitted from the request when left
-    unset, and the model's default applies. The values are documented once, on
-    ``llb_embed_create`` in ``llamabridge.h``, and are not restated here.
+    ``pooling``, ``n_ctx``, ``n_batch`` and ``n_gpu_layers`` are omitted from the
+    request when left unset, and the model's default applies. The values are
+    documented once, on ``llb_embed_create`` in ``llamabridge.h``, and are not
+    restated here.
+
+    ``n_gpu_layers`` behaves exactly as it does on :class:`Chat`: unset means all
+    layers, and ``0`` is CPU only -- a deliberate setting, not "unset".
     """
 
     def __init__(
@@ -471,6 +487,7 @@ class Embedder:
         pooling: str | None = None,
         n_ctx: int | None = None,
         n_batch: int | None = None,
+        n_gpu_layers: int | None = None,
         on_event: Callable[[str], None] | None = None,
     ) -> None:
         self._lib = load()
@@ -494,6 +511,9 @@ class Embedder:
             config["n_ctx"] = n_ctx
         if n_batch is not None:
             config["n_batch"] = n_batch
+        # `is not None` for the same reason as Chat: 0 means CPU only, not unset.
+        if n_gpu_layers is not None:
+            config["n_gpu_layers"] = n_gpu_layers
         # Same rule as Chat: no keys means send NULL, not "{}". A binding that
         # restated the core's default here would pin the old value the day the core
         # moved it -- and Go, sending nothing, would follow while Python did not.

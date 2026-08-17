@@ -836,8 +836,32 @@ extern "C" llb_chat_t* llb_chat_create(const char* gguf_path,
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
-    // CPU-only build for an x86_64 Mac without a Metal-capable GPU.
-    mparams.n_gpu_layers = 0;
+    /* Offload everything the backend will take, by default.
+       This used to be hardcoded to 0 with the comment "CPU-only build for an
+       x86_64 Mac without a Metal-capable GPU" -- an assumption inherited from
+       mochallama that silently disabled the GPU for EVERY user on EVERY
+       platform. Measured on an M5 Pro: Metal initialised, reported the GPU by
+       name, and then "offloaded 0/29 layers to GPU". We were shipping
+       libggml-metal and never using it.
+       999 rather than -1: llama.cpp clamps to the model's layer count, and on a
+       build with no GPU backend nothing is offloaded, so this is safe
+       everywhere. Override with "n_gpu_layers" in the create config. */
+    mparams.n_gpu_layers = 999;
+
+    /* Read n_gpu_layers here, NOT with the context settings below: the model is
+       loaded on the next line, so an override parsed later would be read after
+       the decision it controls had already been made. 0 = CPU only. */
+    if (config_json && *config_json) {
+        try {
+            json pre = json::parse(config_json);
+            if (pre.contains("n_gpu_layers") && pre["n_gpu_layers"].is_number()) {
+                mparams.n_gpu_layers = pre["n_gpu_layers"].get<int>();
+            }
+        } catch (const std::exception&) {
+            /* A malformed config is reported once, below, where the context
+               settings are parsed. Silently keep the default here. */
+        }
+    }
 
     chat->model = llama_model_load_from_file(gguf_path, mparams);
     if (!chat->model) {
@@ -979,6 +1003,9 @@ extern "C" const char* llb_model_info(const char* gguf_path) {
     // Load just the model (no inference context) — enough to read GGUF KV and
     // build chat templates. Cheaper than a full create; freed before returning.
     llama_model_params mparams = llama_model_default_params();
+    /* Deliberately 0: this loads the model only to read its metadata and chat
+       template, then frees it. Offloading for that would spend GPU time and
+       memory to answer a question about a file. */
     mparams.n_gpu_layers = 0;
 
     struct llama_model* model = llama_model_load_from_file(gguf_path, mparams);
@@ -1216,7 +1243,17 @@ extern "C" llb_embed_t* llb_embed_create(const char* gguf_path,
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
-    mparams.n_gpu_layers = 0;
+    /* Same default as chat -- see the note there. Overridable via
+       "n_gpu_layers" in the create config. */
+    mparams.n_gpu_layers = 999;
+    if (config_json && *config_json) {
+        try {
+            json pre = json::parse(config_json);
+            if (pre.contains("n_gpu_layers") && pre["n_gpu_layers"].is_number()) {
+                mparams.n_gpu_layers = pre["n_gpu_layers"].get<int>();
+            }
+        } catch (const std::exception&) { /* reported where the rest is parsed */ }
+    }
 
     e->model = llama_model_load_from_file(gguf_path, mparams);
     if (!e->model) {

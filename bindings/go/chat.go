@@ -301,6 +301,10 @@ type openConfig struct {
 	// set" and is omitted, so an Open with no options sends NO config at all and the
 	// core applies exactly the defaults it used before the parameter existed.
 	nCtx, nBatch, nSeqMax int
+	// nGPULayers needs a pointer, not a zero-means-unset int: 0 is a LEGITIMATE
+	// value meaning "CPU only", and it is exactly the value someone sets
+	// deliberately. Collapsing it into "unset" would silently give them the GPU.
+	nGPULayers *int
 }
 
 // WithEventHandler receives the core's progress events during load and inference.
@@ -315,6 +319,18 @@ func WithEventHandler(fn func(string)) Option {
 // live engine.
 func WithContextSize(n int) Option {
 	return func(c *openConfig) { c.nCtx = n }
+}
+
+// WithGPULayers sets how many model layers are offloaded to the GPU.
+//
+// Unset means ALL of them, which is the core's default and almost always what you
+// want -- llama.cpp clamps to the model's layer count, and on a build with no GPU
+// backend nothing is offloaded, so it is safe everywhere.
+//
+// Pass 0 for CPU-only. That is a real setting, not "unset": use it to make a
+// measurement reproducible across machines, or to leave the GPU for something else.
+func WithGPULayers(n int) Option {
+	return func(c *openConfig) { c.nGPULayers = &n }
 }
 
 // WithBatchSize sets the logical batch size. Unset means the core's default.
@@ -353,6 +369,9 @@ func Open(ggufPath string, opts ...Option) (*Chat, error) {
 	}
 	if cfg.nBatch > 0 {
 		config["n_batch"] = cfg.nBatch
+	}
+	if cfg.nGPULayers != nil {
+		config["n_gpu_layers"] = *cfg.nGPULayers
 	}
 	if cfg.nSeqMax > 0 {
 		config["n_seq_max"] = cfg.nSeqMax

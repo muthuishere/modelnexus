@@ -14,6 +14,14 @@ three separate faults, each of which a green CI run had hidden.
 
 ### Fixed
 
+- **The GPU was switched off for everyone.** Every engine was created with zero layers
+  offloaded — a line inherited from mochallama that assumed a Mac with no usable GPU and then
+  applied to every user on every platform. On an M5 Pro, Metal initialised, named the GPU, and
+  offloaded 0 of 29 layers: we shipped the Metal backend and never ran a token through it.
+  Models now use every layer the hardware will take, with no change to your code. A new
+  create-time option (`WithGPULayers` in Go, `n_gpu_layers` in Python, `nGpuLayers` in JS and
+  C#) takes it back: pass `0` for CPU only when a measurement has to be reproducible across
+  machines, or when the GPU belongs to something else.
 - **The native could not load a model on Windows.** Trivial calls worked; loading a GGUF died
   with `0xC0000409` every time. The cause was a static CRT combined with separate DLLs:
   `llamabridge.dll`, `llama.dll` and `ggml*.dll` each linked their own copy of the runtime and

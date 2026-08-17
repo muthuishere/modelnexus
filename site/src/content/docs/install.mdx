@@ -82,7 +82,12 @@ linked in, so there is nothing to install alongside it — no Visual C++ Redistr
 sibling libraries to keep together. 0.2.0 needed the redistributable and said so only by failing
 with "The specified module could not be found", naming a file that was right there.
 
-CPU and Metal. No CUDA in the published builds.
+**The GPU is used by default** — every layer offloaded, Metal on macOS. Until 0.2.1 it was
+hardcoded off for everyone: Metal would initialise, name your GPU, and then report
+`offloaded 0/29 layers to GPU`. Pass `n_gpu_layers: 0` to get CPU-only back, which is worth
+doing when you want a measurement that reproduces across machines.
+
+No CUDA in the published builds.
 
 Skip the step entirely and you get a typed error listing every path searched. Never a
 segfault.
