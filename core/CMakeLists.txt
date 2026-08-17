@@ -100,7 +100,26 @@ else()
     set(LLAMA_BUILD_SERVER    OFF CACHE BOOL "" FORCE)
     set(LLAMA_BUILD_TOOLS     OFF CACHE BOOL "" FORCE)
     set(LLAMA_CURL            OFF CACHE BOOL "" FORCE)
-    set(BUILD_SHARED_LIBS     ON  CACHE BOOL "" FORCE)
+    # On Windows, link llama/ggml STATICALLY into llamabridge.dll.
+    #
+    # This is not a size preference, it is a correctness requirement, and it is
+    # the other half of the static-CRT decision above. A statically linked CRT
+    # gives every DLL its OWN heap. With llama.dll and ggml*.dll as separate
+    # DLLs, memory allocated inside llama and freed inside the bridge (or the
+    # reverse) crosses a heap boundary and corrupts it.
+    #
+    # Measured, on both Windows x64 and Windows ARM64, through two different
+    # FFIs (Go/purego and JS/koffi): trivial calls succeed, `llb_model_info` on
+    # a MISSING path returns clean error JSON, and loading a real GGUF dies with
+    # 0xC0000409 (STATUS_STACK_BUFFER_OVERRUN) every time. Same crash from both
+    # bindings, so the fault was never in the binding.
+    #
+    # One DLL, one CRT, one heap: no redistributable, no cross-DLL allocation.
+    if(MSVC)
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    else()
+        set(BUILD_SHARED_LIBS ON  CACHE BOOL "" FORCE)
+    endif()
     set(LLAMA_BUILD_COMMON    ON  CACHE BOOL "" FORCE)
     set(LLAMA_BUILD_UI        OFF CACHE BOOL "" FORCE)
     set(LLAMA_BUILD_HTML      OFF CACHE BOOL "" FORCE)
