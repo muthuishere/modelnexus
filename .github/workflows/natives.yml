@@ -91,6 +91,20 @@ jobs:
             *-aarch64) grep -q arm64  <<<"$arch" || { echo "::error::not arm64";  exit 1; } ;;
           esac
 
+          # Rosetta 2 is what makes an arm64 runner an honest Intel test bed, and it is
+          # NOT preinstalled -- the first attempt died here with exit 127, `arch`
+          # unable to exec an x86_64 binary. Installing it is one command and a minute.
+          #
+          # Explicitly, rather than falling back to a weaker check: the entire reason
+          # this step exists is that `lipo -archs` proves nothing, so degrading to it
+          # when Rosetta is missing would quietly restore the situation that shipped
+          # three broken Windows natives.
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "installing Rosetta 2"
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          arch -x86_64 /usr/bin/true || { echo "::error::Rosetta 2 unavailable; cannot verify an Intel native here"; exit 1; }
+
           # A 0.5B model: this proves the kernels run, not that the model is good.
           model="$PWD/.model.gguf"
           curl -fsSL -o "$model" \
