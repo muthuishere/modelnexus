@@ -39,6 +39,57 @@ type ToolCall struct {
 	Arguments string `json:"arguments"`
 }
 
+// MarshalJSON writes the OpenAI shape, not this struct's own.
+//
+// The core parses incoming messages with llama.cpp's oaicompat parser, which
+// requires {"id", "type":"function", "function":{"name","arguments"}}. This
+// struct is deliberately FLAT because that is nicer to read a result from -- but
+// sending the flat form back is rejected with "Missing tool call type", and only
+// on the SECOND turn of a tool-calling loop, long after the mistake.
+//
+// So: flat to read, OpenAI-shaped on the wire. Feeding a Response's ToolCalls
+// straight back into the next Request is the whole point of a tool loop, and it
+// has to work.
+func (t ToolCall) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}{
+		ID:   t.ID,
+		Type: "function",
+		Function: struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}{Name: t.Name, Arguments: t.Arguments},
+	})
+}
+
+// UnmarshalJSON accepts BOTH shapes: the core answers in the flat form, and a
+// caller replaying an OpenAI transcript has the nested one.
+func (t *ToolCall) UnmarshalJSON(b []byte) error {
+	var flat struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+		Function  *struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(b, &flat); err != nil {
+		return err
+	}
+	t.ID, t.Name, t.Arguments = flat.ID, flat.Name, flat.Arguments
+	if flat.Function != nil {
+		t.Name, t.Arguments = flat.Function.Name, flat.Function.Arguments
+	}
+	return nil
+}
+
 // Tool is a function the model may call, in OpenAI's schema shape.
 type Tool struct {
 	Type     string       `json:"type"`
@@ -305,6 +356,8 @@ type openConfig struct {
 	// value meaning "CPU only", and it is exactly the value someone sets
 	// deliberately. Collapsing it into "unset" would silently give them the GPU.
 	nGPULayers *int
+	// onProgress reports download progress when the model reference is remote.
+	onProgress func(done, total int64)
 }
 
 // WithEventHandler receives the core's progress events during load and inference.
@@ -319,6 +372,15 @@ func WithEventHandler(fn func(string)) Option {
 // live engine.
 func WithContextSize(n int) Option {
 	return func(c *openConfig) { c.nCtx = n }
+}
+
+// WithDownloadProgress reports bytes as a remote model is fetched.
+//
+// Worth setting for anything but a local path: a 4 GB model on a slow link makes
+// Open look like a hang, and a silent hang is a worse bug than the one URI
+// support exists to fix.
+func WithDownloadProgress(fn func(done, total int64)) Option {
+	return func(c *openConfig) { c.onProgress = fn }
 }
 
 // WithGPULayers sets how many model layers are offloaded to the GPU.
@@ -353,7 +415,24 @@ func WithMaxSequences(n int) Option {
 //
 // Models whose chat template cannot do tool calling are rejected here rather than
 // silently degraded -- a deliberate contract inherited from the core.
+// Open loads a model and builds a generation engine.
+//
+// ggufPath is a model REFERENCE, not necessarily a path (ADR-0009):
+//
+//	"model.gguf"                                a local file
+//	"hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF/x.gguf" Hugging Face
+//	"https://internal.example/x.gguf"           any HTTP source
+//	"s3://bucket/x.gguf"                        S3 (build with -tags aws)
+//
+// A remote reference is downloaded once into the cache and reused. Use
+// WithDownloadProgress to report it, and OpenContext to cancel it.
 func Open(ggufPath string, opts ...Option) (*Chat, error) {
+	return OpenContext(context.Background(), ggufPath, opts...)
+}
+
+// OpenContext is Open with cancellation, which matters when the reference is
+// remote: a model download is the one part of this library that can take minutes.
+func OpenContext(ctx context.Context, ggufPath string, opts ...Option) (*Chat, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -363,6 +442,14 @@ func Open(ggufPath string, opts ...Option) (*Chat, error) {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	// Resolve BEFORE touching the core: the ABI takes a path that exists, and
+	// keeping it that way is what stops an HTTP and an S3 client from ending up
+	// inside a C++ library shipped as a prebuilt binary for five platforms.
+	resolved, err := Resolve(ctx, ggufPath, cfg.onProgress)
+	if err != nil {
+		return nil, err
+	}
+	ggufPath = resolved
 	config := map[string]any{}
 	if cfg.nCtx > 0 {
 		config["n_ctx"] = cfg.nCtx
